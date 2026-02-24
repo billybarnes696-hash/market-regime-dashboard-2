@@ -1,6 +1,9 @@
-streamlit
-yfinance
-pandas
-numpy
-pandas-ta
-matplotlib
+streamlit>=1.36
+yfinance>=0.2.43
+pandas>=2.2
+numpy>=1.26
+pandas_ta>=0.3.14b0
+plotly>=5.22
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2
