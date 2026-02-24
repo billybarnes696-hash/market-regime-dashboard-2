@@ -9,7 +9,7 @@ import yfinance as yf
 # ============================================
 # CONFIG & STYLING
 # ============================================
-st.set_page_config(page_title="SPY/IEF Signal Dashboard", layout="wide", page_icon="📊")
+st.set_page_config(page_title="Market Regime Dashboard", layout="wide", page_icon="📊")
 
 st.markdown("""
 <style>
@@ -21,8 +21,8 @@ st.markdown("""
     .bullish {color: #10b981; font-weight: bold;}
     .bearish {color: #ef4444; font-weight: bold;}
     .neutral {color: #6b7280; font-weight: bold;}
-    .extreme-complacency {background: #dc2626; color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-weight: bold;}
-    .extreme-fear {background: #10b981; color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-weight: bold;}
+    .canary-warning {background: #dc2626; color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem;}
+    .canary-ok {background: #10b981; color: white; padding: 0.25rem 0.5rem; border-radius: 4px; font-weight: bold; font-size: 0.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -32,344 +32,305 @@ st.markdown("""
 
 @st.cache_data(ttl=3600)
 def fetch_spy_history(years=15):
-    """Fetch SPY historical data"""
+    """Fetch SPY historical data for backtesting"""
     end = datetime.now()
     start = end - timedelta(days=years*365)
     spy = yf.download('SPY', start=start, end=end, progress=False)
     return spy
 
-@st.cache_data(ttl=3600)
-def fetch_put_call_data():
-    """
-    Fetch CPCE and CPC data from FRED or yfinance
-    CPCE: CBOE Equity Put/Call Ratio
-    CPC: CBOE Total Put/Call Ratio
-    """
-    try:
-        # Try to fetch from FRED (Federal Reserve Economic Data)
-        from fredapi import Fred
-        fred = Fred(api_key=st.secrets.get('FRED_API_KEY', 'demo_key'))
-        
-        # CPCE - Equity Put/Call Ratio
-        cpce = fred.get_series('CPCE')
-        # CPC - Total Put/Call Ratio  
-        cpc = fred.get_series('CPC')
-        
-        return cpce, cpc
-    except:
-        # Mock data for demonstration
-        dates = pd.date_range(end=datetime.now(), periods=252, freq='B')
-        cpce = pd.Series(np.random.uniform(0.45, 0.85, len(dates)), index=dates, name='CPCE')
-        cpc = pd.Series(np.random.uniform(0.65, 1.15, len(dates)), index=dates, name='CPC')
-        return cpce, cpc
+@st.cache_data(ttl=86400)
+def fetch_ief_history(years=15):
+    """Fetch IEF historical data for backtesting"""
+    end = datetime.now()
+    start = end - timedelta(days=years*365)
+    ief = yf.download('IEF', start=start, end=end, progress=False)
+    return ief
 
-@st.cache_data(ttl=3600)
-def generate_mock_breadth_data(spy_df):
-    """Generate simulated breadth indicators"""
+@st.cache_data(ttl=86400)
+def generate_historical_breadth_data(spy_df):
+    """
+    Generate simulated historical breadth indicators.
+    In production, replace with real StockCharts CSV data.
+    """
     df = spy_df.copy()
+    np.random.seed(42)  # Fixed seed for consistency
     
-    # Simulate $NYHL Cumulative
-    df['nyhl_cum'] = df['Close'].pct_change().rolling(20).sum().cumsum() * 1000 + 25000
+    # Simulate $NYHL Cumulative (trending with SPY)
+    returns = df['Close'].pct_change()
+    df['nyhl_cum'] = (returns.rolling(20).sum().cumsum() * 10000 + 25000).fillna(method='ffill')
     df['nyhl_sma200'] = df['nyhl_cum'].rolling(200).mean()
+    df['nyhl_sma50'] = df['nyhl_cum'].rolling(50).mean()
     
-    # Simulate $BPSPX
+    # Simulate $BPSPX (mean-reverting around 50)
     momentum = df['Close'].pct_change(20).rolling(10).mean()
-    df['bpspx_value'] = 50 + momentum * 30 + np.random.normal(0, 5, len(df))
-    df['bpspx_value'] = df['bpspx_value'].clip(10, 90)
-    df['bpspx_rsi14'] = 50 + momentum * 40 + np.random.normal(0, 8, len(df))
-    df['bpspx_rsi14'] = df['bpspx_rsi14'].clip(10, 90)
+    df['bpspx_value'] = (50 + momentum * 30 + np.random.normal(0, 5, len(df))).clip(10, 90)
+    df['bpspx_rsi14'] = (50 + momentum * 40 + np.random.normal(0, 8, len(df))).clip(10, 90)
     df['bpspx_macd_hist'] = momentum * 2 + np.random.normal(0, 0.3, len(df))
+    df['bpspx_sma50'] = df['bpspx_value'].rolling(50).mean()
     
-    # Simulate $OEXA150R
+    # Simulate $OEXA150R (% above 150-DMA)
     ma150 = df['Close'].rolling(150).mean()
     above_ma = (df['Close'] > ma150).astype(float)
-    df['oexa150r_value'] = above_ma.rolling(20).mean() * 100 + np.random.normal(0, 8, len(df))
-    df['oexa150r_value'] = df['oexa150r_value'].clip(10, 90)
-    df['oexa150r_cci14'] = (df['Close'] - df['Close'].rolling(14).mean()) / df['Close'].rolling(14).std() * 100
+    df['oexa150r_value'] = (above_ma.rolling(20).mean() * 100 + np.random.normal(0, 8, len(df))).clip(10, 90)
+    df['oexa150r_cci14'] = ((df['Close'] - df['Close'].rolling(14).mean()) / df['Close'].rolling(14).std() * 100)
     
-    # Simulate SPY:VXX ratio
-    returns = df['Close'].pct_change()
+    # Simulate SPY:VXX Ratio (inverse of volatility)
     vol = returns.rolling(20).std()
-    df['spy_vxx_ratio'] = 1 / (vol * 100) + np.random.normal(0, 3, len(df))
+    df['spy_vxx_ratio'] = (1 / (vol * 100) + np.random.normal(0, 3, len(df))).clip(5, 50)
     df['spy_vxx_sma50'] = df['spy_vxx_ratio'].rolling(50).mean()
+    df['spy_vxx_sma200'] = df['spy_vxx_ratio'].rolling(200).mean()
     
     # Simulate VIX
-    df['vix'] = 20 - momentum * 15 + np.random.normal(0, 4, len(df))
-    df['vix'] = df['vix'].clip(10, 50)
+    df['vix'] = (20 - momentum * 15 + np.random.normal(0, 4, len(df))).clip(10, 50)
     
-    # Simulate credit spread
-    df['hy_spread_bps'] = 350 - momentum * 100 + np.random.normal(0, 30, len(df))
-    df['hy_spread_bps'] = df['hy_spread_bps'].clip(200, 600)
+    # Simulate Credit Spread (Canary Indicator)
+    df['hy_spread_bps'] = (350 - momentum * 100 + np.random.normal(0, 30, len(df))).clip(200, 600)
     
-    # Simulate McClellan
+    # Simulate McClellan Oscillator (Canary Indicator)
     df['mcclellan_osc'] = momentum * 80 + np.random.normal(0, 20, len(df))
+    
+    # Simulate Semis/SPX Ratio (Canary Indicator)
+    df['semis_spx_ratio'] = (1.5 + momentum * 0.5 + np.random.normal(0, 0.2, len(df))).clip(0.8, 2.5)
+    df['semis_spx_sma50'] = df['semis_spx_ratio'].rolling(50).mean()
+    
+    # Simulate Small/Large Cap Ratio (Canary Indicator)
+    df['smallcap_largecap_ratio'] = (0.45 + momentum * 0.1 + np.random.normal(0, 0.05, len(df))).clip(0.30, 0.60)
     
     return df.dropna()
 
 # ============================================
-# SIGNAL ENGINE
+# CANARY INDICATOR CHECK
 # ============================================
 
-def analyze_signals_with_putcall(data, cpce_current, cpc_current):
-    """Enhanced signal analysis including put/call ratios"""
-    signal_details = []
+def check_canary_warnings(row):
+    """Check canary indicators for early warning signals"""
+    warnings = 0
+    details = []
     
-    # === PRIMARY REGIME: $NYHL ===
-    nyhl_signal = "BULLISH" if data['nyhl_cum'] > data['nyhl_sma200'] else "BEARISH"
-    signal_details.append({
-        'Indicator': '$NYHL Cumulative',
-        'Reading': f"{data['nyhl_cum']:,} vs {data['nyhl_sma200']:,}",
-        'Signal': nyhl_signal,
-        'Weight': 4,
-        'Icon': "✅" if nyhl_signal == "BULLISH" else "❌"
-    })
+    # Tier 1: Credit spreads (highest priority)
+    if row['hy_spread_bps'] > 450:
+        warnings += 2
+        details.append("🔴 Credit Stress")
     
-    # === PUT/CALL RATIOS (CONTRARIAN) ===
-    # CPCE Analysis
-    if cpce_current < 0.55:
-        cpce_signal = "EXTREME COMPLACENCY (Bearish)"
-        cpce_icon = "❌"
-        cpce_weight = 4
-    elif cpce_current < 0.65:
-        cpce_signal = "COMPLACENCY (Bearish)"
-        cpce_icon = "⚠️"
-        cpce_weight = 3
-    elif cpce_current > 0.90:
-        cpce_signal = "EXTREME FEAR (Bullish)"
-        cpce_icon = "✅"
-        cpce_weight = 4
-    elif cpce_current > 0.80:
-        cpce_signal = "FEAR (Bullish)"
-        cpce_icon = "✅"
-        cpce_weight = 3
-    else:
-        cpce_signal = "NEUTRAL"
-        cpce_icon = "⚪"
-        cpce_weight = 2
+    # Tier 2: Leadership deterioration
+    if 'semis_spx_ratio' in row and row['semis_spx_ratio'] < row.get('semis_spx_sma50', 1.5):
+        warnings += 1
+        details.append("🟠 Semis Weakness")
     
-    signal_details.append({
-        'Indicator': 'CPCE Put/Call Ratio',
-        'Reading': f"{cpce_current:.3f}",
-        'Signal': cpce_signal,
-        'Weight': cpce_weight,
-        'Icon': cpce_icon
-    })
+    if 'smallcap_largecap_ratio' in row and row['smallcap_largecap_ratio'] < 0.40:
+        warnings += 1
+        details.append("🟠 Small Cap Weakness")
     
-    # CPC Analysis
-    if cpc_current < 0.65:
-        cpc_signal = "COMPLACENCY (Bearish)"
-        cpc_icon = "⚠️"
-        cpc_weight = 3
-    elif cpc_current > 1.10:
-        cpc_signal = "PANIC (Bullish)"
-        cpc_icon = "✅"
-        cpc_weight = 4
-    elif cpc_current > 0.95:
-        cpc_signal = "CAUTION (Bullish)"
-        cpc_icon = "✅"
-        cpc_weight = 2
-    else:
-        cpc_signal = "NEUTRAL"
-        cpc_icon = "⚪"
-        cpc_weight = 2
+    # Tier 3: Breadth momentum
+    if 'mcclellan_osc' in row and row['mcclellan_osc'] < -50:
+        warnings += 1
+        details.append("🟡 Breadth Weakness")
     
-    signal_details.append({
-        'Indicator': 'CPC Total Put/Call',
-        'Reading': f"{cpc_current:.3f}",
-        'Signal': cpc_signal,
-        'Weight': cpc_weight,
-        'Icon': cpc_icon
-    })
-    
-    # === $BPSPX ===
-    if data['bpspx_rsi14'] < 35:
-        bpspx_signal = "OVERSOLD (Bullish)"
-        bpspx_icon = "✅"
-        bpspx_weight = 3
-    elif data['bpspx_rsi14'] > 65:
-        bpspx_signal = "OVERBOUGHT (Bearish)"
-        bpspx_icon = "❌"
-        bpspx_weight = 3
-    else:
-        bpspx_signal = "NEUTRAL"
-        bpspx_icon = "⚪"
-        bpspx_weight = 2
-    
-    signal_details.append({
-        'Indicator': '$BPSPX RSI(14)',
-        'Reading': f"{data['bpspx_rsi14']:.1f}",
-        'Signal': bpspx_signal,
-        'Weight': bpspx_weight,
-        'Icon': bpspx_icon
-    })
-    
-    # === $OEXA150R ===
-    if data['oexa150r_value'] < 30:
-        oexa_signal = "OVERSOLD (Bullish)"
-        oexa_icon = "✅"
-        oexa_weight = 3
-    elif data['oexa150r_value'] > 75:
-        oexa_signal = "OVERBOUGHT (Bearish)"
-        oexa_icon = "❌"
-        oexa_weight = 3
-    else:
-        oexa_signal = "NEUTRAL"
-        oexa_icon = "⚪"
-        oexa_weight = 2
-    
-    signal_details.append({
-        'Indicator': '$OEXA150R',
-        'Reading': f"{data['oexa150r_value']:.1f}%",
-        'Signal': oexa_signal,
-        'Weight': oexa_weight,
-        'Icon': oexa_icon
-    })
-    
-    # === RISK SENTIMENT ===
-    if data['spy_vxx_ratio'] < data['spy_vxx_sma50'] and data['vix'] > 22:
-        risk_signal = "RISK-OFF (Bearish)"
-        risk_icon = "❌"
-        risk_weight = 3
-    else:
-        risk_signal = "NEUTRAL/RISK-ON"
-        risk_icon = "✅"
-        risk_weight = 2
-    
-    signal_details.append({
-        'Indicator': 'SPY:VXX + VIX',
-        'Reading': f"Ratio:{data['spy_vxx_ratio']:.2f} | VIX:{data['vix']:.1f}",
-        'Signal': risk_signal,
-        'Weight': risk_weight,
-        'Icon': risk_icon
-    })
-    
-    # === SCORING ===
-    df = pd.DataFrame(signal_details)
-    bullish_score = df[df['Signal'].str.contains('Bullish|OVERSOLD|FEAR', case=False, na=False)]['Weight'].sum()
-    bearish_score = df[df['Signal'].str.contains('Bearish|OVERBOUGHT|COMPLACENCY', case=False, na=False)]['Weight'].sum()
-    
-    # === FINAL SIGNAL ===
-    # Check for extreme complacency (market top warning)
-    if cpce_current < 0.55 or (cpce_current < 0.65 and cpc_current < 0.70):
-        signal_label, signal_class = "WARNING - COMPLACENCY", "signal-warning"
-        allocation = {'SPY': 40, 'IEF': 45, 'CASH': 15}
-    # Check for extreme fear (market bottom opportunity)
-    elif cpce_current > 0.90 or cpc_current > 1.10:
-        signal_label, signal_class = "BUY DIP - FEAR", "signal-buy"
-        allocation = {'SPY': 80, 'IEF': 15, 'CASH': 5}
-    # Normal signal logic
-    elif data['nyhl_cum'] < data['nyhl_sma200'] or bearish_score >= 10:
-        signal_label, signal_class = "SELL", "signal-sell"
-        allocation = {'SPY': 20, 'IEF': 60, 'CASH': 20}
-    elif bearish_score > bullish_score:
-        signal_label, signal_class = "WARNING", "signal-warning"
-        allocation = {'SPY': 40, 'IEF': 45, 'CASH': 15}
-    elif bullish_score - bearish_score >= 3:
-        signal_label, signal_class = "BUY", "signal-buy"
-        allocation = {'SPY': 75, 'IEF': 20, 'CASH': 5}
-    else:
-        signal_label, signal_class = "HOLD", "signal-hold"
-        allocation = {'SPY': 65, 'IEF': 25, 'CASH': 10}
-    
-    return signal_label, signal_class, allocation, df, bullish_score, bearish_score
+    return warnings, details
 
 # ============================================
-# MAIN DASHBOARD
+# SIGNAL GENERATION (HISTORICAL)
 # ============================================
 
-def main():
-    st.title("📊 SPY vs IEF Signal Dashboard")
-    st.markdown("*Breadth-Momentum framework with **Put/Call Ratio contrarian signals***")
+def generate_historical_signals(df):
+    """Generate historical signals for each day"""
+    signals = []
+    allocations = []
+    canary_scores = []
     
-    # === SIDEBAR ===
-    with st.sidebar:
-        st.header("⚙️ Configuration")
+    for idx, row in df.iterrows():
+        # Primary regime
+        regime_bull = row['nyhl_cum'] > row['nyhl_sma200']
         
-        # Put/Call manual entry
-        st.subheader("📊 Put/Call Ratios")
-        cpce_manual = st.number_input("CPCE (Equity P/C)", min_value=0.30, max_value=1.50, value=0.62, step=0.01)
-        cpc_manual = st.number_input("CPC (Total P/C)", min_value=0.40, max_value=2.00, value=0.85, step=0.01)
+        # Early warning
+        bpspx_bear = (row['bpspx_rsi14'] < 40 and row['bpspx_macd_hist'] < 0) or \
+                     (row['bpspx_value'] < row['bpspx_sma50'] and row['bpspx_macd_hist'] < 0)
         
-        st.info(f"""
-        **Current Readings:**
-        - CPCE: {cpce_manual:.3f} {'⚠️ COMPLACENT' if cpce_manual < 0.65 else '✅ NEUTRAL' if cpce_manual < 0.85 else '🟢 FEAR'}
-        - CPC: {cpc_manual:.3f} {'⚠️ COMPLACENT' if cpc_manual < 0.70 else '✅ NEUTRAL' if cpc_manual < 0.95 else '🟢 FEAR'}
-        """)
+        # Entry confirmation
+        oexa_oversold = row['oexa150r_value'] < 35 and row['oexa150r_cci14'] < -100
         
-        if st.button("🔄 Refresh", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
+        # Risk sentiment
+        risk_off = row['spy_vxx_ratio'] < row['spy_vxx_sma50'] and row['vix'] > 20
         
-        st.caption("⚠️ Not investment advice. Test before live use.")
+        # Canary check
+        canary_score, canary_details = check_canary_warnings(row)
+        canary_scores.append(canary_score)
+        
+        # Scoring
+        bull_score = int(regime_bull) * 4 + int(oexa_oversold) * 3 + int(row['mcclellan_osc'] > 20) * 2
+        bear_score = (int(not regime_bull) * 4 + int(bpspx_bear) * 3 + 
+                     int(risk_off) * 3 + int(canary_score >= 3) * 3)
+        
+        # Signal logic with canary weighting
+        if canary_score >= 5:
+            signal = "WARNING - CANARIES"
+            alloc = {'SPY': 0.40, 'IEF': 0.45, 'CASH': 0.15}
+        elif not regime_bull or (bear_score >= 8 and bull_score < 4):
+            signal = "SELL"
+            alloc = {'SPY': 0.20, 'IEF': 0.60, 'CASH': 0.20}
+        elif bear_score > bull_score and regime_bull:
+            signal = "WARNING"
+            alloc = {'SPY': 0.40, 'IEF': 0.45, 'CASH': 0.15}
+        elif oexa_oversold and regime_bull:
+            signal = "BUY DIP"
+            alloc = {'SPY': 0.80, 'IEF': 0.15, 'CASH': 0.05}
+        elif bull_score - bear_score >= 3 and regime_bull:
+            signal = "BUY"
+            alloc = {'SPY': 0.85, 'IEF': 0.10, 'CASH': 0.05}
+        else:
+            signal = "HOLD"
+            alloc = {'SPY': 0.65, 'IEF': 0.25, 'CASH': 0.10}
+        
+        signals.append(signal)
+        allocations.append(alloc)
     
-    # === FETCH DATA ===
-    cpce_series, cpc_series = fetch_put_call_data()
+    df = df.copy()
+    df['signal'] = signals
+    df['allocation'] = allocations
+    df['canary_score'] = canary_scores
+    return df
+
+def calculate_strategy_returns(df, ief_df=None):
+    """Calculate strategy vs buy-and-hold returns"""
+    df = df.copy()
+    df['spy_return'] = df['Close'].pct_change().fillna(0)
     
-    # Use manual inputs or latest from series
-    cpce_current = cpce_manual if cpce_manual != 0.62 else cpce_series.iloc[-1]
-    cpc_current = cpc_manual if cpc_manual != 0.85 else cpc_series.iloc[-1]
+    # IEF returns if available
+    if ief_df is not None:
+        ief_returns = ief_df['Close'].pct_change().reindex(df.index).fillna(0)
+    else:
+        # Simplified IEF return (positive when SPY negative)
+        ief_returns = -0.3 * df['spy_return'].apply(lambda x: x if x < 0 else 0) + 0.02/252
     
-    # Mock breadth data (replace with real data source)
+    # Strategy returns
+    def daily_return(row):
+        spy_ret = row['spy_return']
+        ief_ret = ief_returns.loc[row.name] if row.name in ief_returns.index else 0.02/252
+        return row['allocation']['SPY'] * spy_ret + row['allocation']['IEF'] * ief_ret
+    
+    df['strategy_return'] = df.apply(daily_return, axis=1)
+    df['buyhold_cum'] = (1 + df['spy_return']).cumprod() * 100
+    df['strategy_cum'] = (1 + df['strategy_return']).cumprod() * 100
+    
+    return df
+
+# ============================================
+# CURRENT SIGNAL (Based on Your Charts)
+# ============================================
+
+def get_current_signal():
+    """Get current signal based on your uploaded charts (Feb 24, 2026)"""
     data = {
-        'timestamp': datetime.now(),
+        'timestamp': datetime(2026, 2, 24, 11, 52),
         'spx_price': 6877.92,
-        'nyhl_cum': 32941, 'nyhl_sma200': 27441,
-        'bpspx_rsi14': 36.47, 'bpspx_value': 60.00,
+        'nyhl_cum': 32941, 'nyhl_sma200': 27441, 'nyhl_sma50': 29200,
+        'bpspx_value': 60.00, 'bpspx_rsi14': 36.47, 'bpspx_macd_hist': -0.470, 'bpspx_sma50': 60.98,
         'oexa150r_value': 63.00, 'oexa150r_cci14': -163.74,
-        'spy_vxx_ratio': 24.05, 'spy_vxx_sma50': 25.06,
-        'vix': 18.45,
+        'spy_vxx_ratio': 24.05, 'spy_vxx_sma50': 25.06, 'spy_vxx_sma200': 18.50, 'vix': 18.45,
+        'hy_spread_bps': 385, 'mcclellan_osc': -15.4,
+        'semis_spx_ratio': 1.65, 'semis_spx_sma50': 1.70,
+        'smallcap_largecap_ratio': 0.42,
     }
     
-    # === GENERATE SIGNALS ===
-    signal_label, signal_class, allocation, signal_df, bull_score, bear_score = analyze_signals_with_putcall(
-        data, cpce_current, cpc_current
-    )
+    # Canary check
+    canary_score, canary_details = check_canary_warnings(data)
     
-    # === DISPLAY CURRENT SIGNAL ===
+    # Generate signal
+    regime_bull = data['nyhl_cum'] > data['nyhl_sma200']
+    bpspx_bear = data['bpspx_rsi14'] < 40 and data['bpspx_macd_hist'] < 0
+    risk_off = data['spy_vxx_ratio'] < data['spy_vxx_sma50']
+    oexa_oversold = data['oexa150r_value'] < 35 and data['oexa150r_cci14'] < -100
+    
+    if canary_score >= 5:
+        signal = "WARNING - CANARIES"
+        signal_class = "signal-warning"
+        allocation = {'SPY': 40, 'IEF': 45, 'CASH': 15}
+    elif not regime_bull:
+        signal = "SELL"
+        signal_class = "signal-sell"
+        allocation = {'SPY': 20, 'IEF': 60, 'CASH': 20}
+    elif bpspx_bear and risk_off and canary_score >= 3:
+        signal = "WARNING"
+        signal_class = "signal-warning"
+        allocation = {'SPY': 40, 'IEF': 45, 'CASH': 15}
+    elif oexa_oversold and regime_bull:
+        signal = "BUY DIP"
+        signal_class = "signal-buy"
+        allocation = {'SPY': 80, 'IEF': 15, 'CASH': 5}
+    else:
+        signal = "HOLD"
+        signal_class = "signal-hold"
+        allocation = {'SPY': 65, 'IEF': 25, 'CASH': 10}
+    
+    return signal, signal_class, allocation, data, canary_score, canary_details
+
+# ============================================
+# CURRENT SIGNAL TAB
+# ============================================
+
+def render_current_signal_tab():
+    """Render the current signal dashboard"""
+    signal, signal_class, allocation, data, canary_score, canary_details = get_current_signal()
+    
+    # Top signal banner
     col1, col2 = st.columns([2, 1])
     with col1:
-        st.markdown(f"<div class='{signal_class}'>{signal_label}</div>", unsafe_allow_html=True)
-        st.caption(f"Updated: {data['timestamp'].strftime('%Y-%m-%d %H:%M')}")
+        st.markdown(f"<div class='{signal_class}'>{signal}</div>", unsafe_allow_html=True)
+        st.caption(f"Updated: {data['timestamp'].strftime('%Y-%m-%d %H:%M')} | SPX: ${data['spx_price']:,.2f}")
     with col2:
         regime = "🟢 Bullish" if data['nyhl_cum'] > data['nyhl_sma200'] else "🔴 Bearish"
         st.metric("Primary Regime", regime)
     
-    # === PUT/CALL RATIO VISUALIZATION ===
-    st.subheader("📊 Put/Call Ratio Analysis (Contrarian Indicator)")
+    # Canary indicators status
+    st.subheader("🚨 Canary Indicators")
+    canary_cols = st.columns(4)
+    with canary_cols[0]:
+        credit_status = "🔴 Stress" if data['hy_spread_bps'] > 450 else "✅ Normal"
+        st.metric("Credit Spreads", f"{data['hy_spread_bps']} bps", credit_status)
+    with canary_cols[1]:
+        semis_status = "⚠️ Weak" if data['semis_spx_ratio'] < data['semis_spx_sma50'] else "✅ Strong"
+        st.metric("Semis/SPX", f"{data['semis_spx_ratio']:.2f}", semis_status)
+    with canary_cols[2]:
+        smallcap_status = "⚠️ Weak" if data['smallcap_largecap_ratio'] < 0.40 else "✅ Normal"
+        st.metric("Small/Large Cap", f"{data['smallcap_largecap_ratio']:.2f}", smallcap_status)
+    with canary_cols[3]:
+        mcclellan_status = "⚠️ Weak" if data['mcclellan_osc'] < -50 else "✅ Normal"
+        st.metric("McClellan", f"{data['mcclellan_osc']:+.1f}", mcclellan_status)
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        # CPCE gauge
-        cpce_color = "🔴" if cpce_current < 0.60 else "🟡" if cpce_current < 0.75 else "🟢"
-        st.metric("CPCE Ratio", f"{cpce_color} {cpce_current:.3f}", 
-                  "Extreme Complacency" if cpce_current < 0.55 else 
-                  "Complacency" if cpce_current < 0.65 else
-                  "Fear" if cpce_current > 0.90 else "Neutral")
-    with col2:
-        # CPC gauge
-        cpc_color = "🔴" if cpc_current < 0.65 else "🟡" if cpc_current < 0.85 else "🟢"
-        st.metric("CPC Ratio", f"{cpc_color} {cpc_current:.3f}",
-                  "Complacency" if cpc_current < 0.70 else
-                  "Fear" if cpc_current > 1.10 else "Neutral")
-    with col3:
-        # Combined signal
-        if cpce_current < 0.60 or cpc_current < 0.70:
-            st.metric("Sentiment", "⚠️ TOO BULLISH", "Market Top Risk")
-        elif cpce_current > 0.85 or cpc_current > 1.05:
-            st.metric("Sentiment", "🟢 TOO BEARISH", "Buying Opportunity")
-        else:
-            st.metric("Sentiment", "⚪ BALANCED", "Neutral")
+    if canary_score >= 3:
+        st.warning(f"⚠️ **{canary_score} Canary Warnings Active**: {', '.join(canary_details)}")
+    else:
+        st.success("✅ Canary indicators are quiet - no early warning signals")
     
-    # Historical chart
-    fig_pc = go.Figure()
-    fig_pc.add_trace(go.Scatter(x=cpce_series.index, y=cpce_series, name='CPCE', line=dict(color='#ef4444')))
-    fig_pc.add_trace(go.Scatter(x=cpc_series.index, y=cpc_series, name='CPC', line=dict(color='#3b82f6')))
-    fig_pc.add_hline(y=0.60, line_dash="dash", line_color="red", annotation_text="Complacency Zone")
-    fig_pc.add_hline(y=0.90, line_dash="dash", line_color="green", annotation_text="Fear Zone")
-    fig_pc.update_layout(title="Put/Call Ratios - Historical Context", height=300, showlegend=True)
-    st.plotly_chart(fig_pc, width="stretch")
+    # Core indicators
+    st.subheader("📊 Core Indicators (From Your Charts)")
+    core_cols = st.columns(3)
+    with core_cols[0]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>$NYHL Cumulative</strong><br>
+            {data['nyhl_cum']:,} vs 200-SMA: {data['nyhl_sma200']:,}<br>
+            {'✅ Bullish Regime' if data['nyhl_cum'] > data['nyhl_sma200'] else '❌ Bearish Regime'}
+        </div>
+        """, unsafe_allow_html=True)
+    with core_cols[1]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>$BPSPX</strong><br>
+            {data['bpspx_value']}% | RSI: {data['bpspx_rsi14']:.1f}<br>
+            {'⚠️ Distribution' if data['bpspx_rsi14'] < 40 else '✅ Neutral/Bullish'}
+        </div>
+        """, unsafe_allow_html=True)
+    with core_cols[2]:
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>$OEXA150R</strong><br>
+            {data['oexa150r_value']}% | CCI: {data['oexa150r_cci14']:.0f}<br>
+            {'🟢 Oversold' if data['oexa150r_value'] < 30 else '🟡 Neutral' if data['oexa150r_value'] < 70 else '🔴 Overbought'}
+        </div>
+        """, unsafe_allow_html=True)
     
-    # === ALLOCATION ===
+    # Allocation
     st.subheader("🎯 Recommended Allocation")
     alloc_df = pd.DataFrame([
         {'ETF': 'SPY', 'Allocation': allocation['SPY']},
@@ -391,17 +352,222 @@ def main():
         fig.update_layout(showlegend=False, xaxis_title='% Allocation', margin=dict(t=0,b=0,l=0,r=0))
         st.plotly_chart(fig, width="stretch")
     
-    # === SIGNAL BREAKDOWN ===
-    st.subheader("📋 Signal Breakdown")
-    st.dataframe(signal_df, use_container_width=True, hide_index=True)
+    # Action buttons
+    st.markdown("### ⚡ Quick Actions")
+    cols = st.columns(3)
+    with cols[0]:
+        st.button("✅ Add SPY", disabled=allocation['SPY'] < 65, width="stretch")
+    with cols[1]:
+        st.button("🛡️ Add IEF", disabled=allocation['IEF'] < 40, width="stretch")
+    with cols[2]:
+        st.button("💵 Raise Cash", disabled=allocation['CASH'] < 15, width="stretch")
+
+# ============================================
+# BACKTEST TAB
+# ============================================
+
+def render_backtest_tab():
+    """Render the historical backtest dashboard"""
+    st.subheader("📈 Historical Backtest (15 Years)")
+    st.markdown("*Visual backtest: See if signals caught major tops and bottoms*")
     
-    # Score summary
-    col1, col2 = st.columns(2)
+    with st.spinner("Loading 15 years of data and calculating signals..."):
+        # Fetch and process data
+        spy_df = fetch_spy_history(15)
+        ief_df = fetch_ief_history(15)
+        breadth_df = generate_historical_breadth_data(spy_df)
+        signal_df = generate_historical_signals(breadth_df)
+        results_df = calculate_strategy_returns(signal_df, ief_df)
+    
+    # Chart 1: SPY Price with Signal Markers
+    st.markdown("### 🔹 SPY Price with Buy/Sell Signals")
+    
+    buy_signals = results_df[results_df['signal'].isin(['BUY', 'BUY DIP'])]
+    sell_signals = results_df[results_df['signal'].isin(['SELL', 'WARNING', 'WARNING - CANARIES'])]
+    
+    fig_price = go.Figure()
+    
+    # SPY Price line
+    fig_price.add_trace(go.Scatter(
+        x=results_df.index,
+        y=results_df['Close'],
+        name='SPY Price',
+        line=dict(color='#1f77b4', width=1.5)
+    ))
+    
+    # Buy signals (green triangles)
+    if not buy_signals.empty:
+        fig_price.add_trace(go.Scatter(
+            x=buy_signals.index,
+            y=buy_signals['Close'],
+            mode='markers',
+            name='BUY Signals',
+            marker=dict(color='#10b981', size=10, symbol='triangle-up')
+        ))
+    
+    # Sell signals (red X)
+    if not sell_signals.empty:
+        fig_price.add_trace(go.Scatter(
+            x=sell_signals.index,
+            y=sell_signals['Close'],
+            mode='markers',
+            name='SELL/WARNING Signals',
+            marker=dict(color='#dc2626', size=10, symbol='x')
+        ))
+    
+    fig_price.update_layout(
+        title='SPY Price with Strategy Signals (2011-2026)',
+        xaxis_title='Date',
+        yaxis_title='Price ($)',
+        height=500,
+        hovermode='x unified',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+    st.plotly_chart(fig_price, width="stretch")
+    
+    # Chart 2: Equity Curve Comparison
+    st.markdown("### 🔹 Strategy vs. Buy-and-Hold Performance")
+    
+    fig_equity = go.Figure()
+    fig_equity.add_trace(go.Scatter(
+        x=results_df.index,
+        y=results_df['buyhold_cum'],
+        name='Buy-and-Hold SPY',
+        line=dict(color='#6b7280', width=2)
+    ))
+    fig_equity.add_trace(go.Scatter(
+        x=results_df.index,
+        y=results_df['strategy_cum'],
+        name='Breadth-Momentum Strategy',
+        line=dict(color='#10b981', width=2.5)
+    ))
+    
+    fig_equity.update_layout(
+        title='Cumulative Returns ($100 Starting Value)',
+        xaxis_title='Date',
+        yaxis_title='Portfolio Value ($)',
+        height=400,
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig_equity, width="stretch")
+    
+    # Performance Metrics
+    st.markdown("### 🔹 Performance Summary (15 Years)")
+    
+    total_return_bh = (results_df['buyhold_cum'].iloc[-1] - 100) / 100 * 100
+    total_return_strat = (results_df['strategy_cum'].iloc[-1] - 100) / 100 * 100
+    
+    years = 15
+    cagr_bh = ((results_df['buyhold_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
+    cagr_strat = ((results_df['strategy_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
+    
+    # Max drawdown
+    def max_dd(cum):
+        peak = cum.cummax()
+        dd = (cum - peak) / peak * 100
+        return dd.min()
+    
+    mdd_bh = max_dd(results_df['buyhold_cum'])
+    mdd_strat = max_dd(results_df['strategy_cum'])
+    
+    # Sharpe ratio
+    excess_bh = results_df['spy_return'] - 0.02/252
+    excess_strat = results_df['strategy_return'] - 0.02/252
+    sharpe_bh = (excess_bh.mean() / excess_bh.std()) * np.sqrt(252) if excess_bh.std() > 0 else 0
+    sharpe_strat = (excess_strat.mean() / excess_strat.std()) * np.sqrt(252) if excess_strat.std() > 0 else 0
+    
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Bullish Score", bull_score, delta=f"vs {bear_score} bearish")
+        st.metric("Total Return", f"{total_return_strat:+.1f}%", 
+                  delta=f"{total_return_strat - total_return_bh:+.1f}% vs BH")
     with col2:
-        net = bull_score - bear_score
-        st.metric("Net Signal", f"{net:+d}", "Bullish" if net > 0 else "Bearish")
+        st.metric("CAGR", f"{cagr_strat:+.1f}%", 
+                  delta=f"{cagr_strat - cagr_bh:+.1f}% vs BH")
+    with col3:
+        st.metric("Max Drawdown", f"{mdd_strat:.1f}%", 
+                  delta=f"{mdd_strat - mdd_bh:+.1f}% vs BH")
+    with col4:
+        st.metric("Sharpe Ratio", f"{sharpe_strat:.2f}", 
+                  delta=f"{sharpe_strat - sharpe_bh:+.2f} vs BH")
+    
+    # Signal Distribution
+    st.markdown("### 🔹 Signal Distribution")
+    signal_counts = results_df['signal'].value_counts()
+    fig_dist = px.bar(
+        x=signal_counts.index,
+        y=signal_counts.values,
+        color=signal_counts.index,
+        color_discrete_map={'BUY': '#10b981', 'BUY DIP': '#3b82f6', 'HOLD': '#f59e0b', 
+                           'WARNING': '#f97316', 'WARNING - CANARIES': '#ec4899', 'SELL': '#dc2626'},
+        labels={'x': 'Signal', 'y': 'Number of Days'}
+    )
+    fig_dist.update_layout(showlegend=False, height=300)
+    st.plotly_chart(fig_dist, width="stretch")
+    
+    # Canary Score Distribution
+    st.markdown("### 🔹 Canary Warning Score Distribution")
+    canary_dist = results_df['canary_score'].value_counts().sort_index()
+    fig_canary = px.bar(
+        x=canary_dist.index.astype(str),
+        y=canary_dist.values,
+        color=canary_dist.index,
+        color_continuous_scale='RdYlGn_r',
+        labels={'x': 'Canary Score', 'y': 'Number of Days'}
+    )
+    fig_canary.update_layout(showlegend=False, height=300)
+    st.plotly_chart(fig_canary, width="stretch")
+    
+    # Disclaimer
+    st.warning("""
+    ⚠️ **Note**: This backtest uses *simulated* breadth indicators for demonstration. 
+    Real historical data from StockCharts would provide more accurate results.
+    Past performance does not guarantee future results.
+    """)
+
+# ============================================
+# MAIN APP
+# ============================================
+
+def main():
+    st.title("📊 Market Regime Dashboard")
+    st.markdown("*Breadth-Momentum framework with **Canary Indicator Early Warning System***")
+    
+    # Tabs
+    tab1, tab2 = st.tabs(["🎯 Current Signal", "📈 Historical Backtest"])
+    
+    with tab1:
+        render_current_signal_tab()
+    
+    with tab2:
+        render_backtest_tab()
+    
+    # Sidebar
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        
+        if st.button("🔄 Refresh Data", width="stretch"):
+            st.cache_data.clear()
+            st.rerun()
+        
+        st.markdown("---")
+        st.markdown("**Core Indicators:**")
+        st.markdown("""
+        - $NYHL Cumulative (Regime)
+        - $BPSPX (Early Warning)
+        - $OEXA150R (Entry)
+        - SPY:VXX Ratio (Risk)
+        """)
+        
+        st.markdown("**Canary Indicators:**")
+        st.markdown("""
+        - 🔴 High Yield Spreads
+        - 🟠 Semis/SPX Ratio
+        - 🟠 Small/Large Cap Ratio
+        - 🟡 McClellan Oscillator
+        """)
+        
+        st.markdown("---")
+        st.caption("⚠️ Not investment advice. Test before live use.")
 
 if __name__ == "__main__":
     main()
