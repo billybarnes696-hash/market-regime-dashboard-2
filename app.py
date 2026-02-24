@@ -6,314 +6,362 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # ============================================
-# CONFIG & STYLING
+# CONFIG
 # ============================================
-st.set_page_config(page_title="Market Regime Dashboard", layout="wide", page_icon="📊")
+st.set_page_config(page_title="SPY/IEF Rotation Dashboard", layout="wide", page_icon="🔄")
 
 st.markdown("""
 <style>
-    .signal-buy {background: linear-gradient(135deg, #10b981, #059669); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
-    .signal-hold {background: linear-gradient(135deg, #f59e0b, #d97706); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
-    .signal-warning {background: linear-gradient(135deg, #f97316, #ea580c); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
-    .signal-sell {background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
+    .signal-spy {background: linear-gradient(135deg, #10b981, #059669); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
+    .signal-ief {background: linear-gradient(135deg, #3b82f6, #2563eb); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
+    .signal-wait {background: linear-gradient(135deg, #f59e0b, #d97706); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
     .metric-card {background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 1rem; border-radius: 10px; color: white; margin: 0.5rem 0;}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================
-# DATA GENERATION
+# DATA (MOCK - Replace with real source later)
 # ============================================
 
 @st.cache_data(ttl=3600)
-def generate_mock_spy_data(days=1260):
+def generate_mock_weekly_data(weeks=260):  # ~5 years of weekly data
+    """Generate weekly mock data for swing/position trading"""
     np.random.seed(42)
-    dates = pd.date_range(end=datetime.now(), periods=days, freq='B')
-    returns = np.random.normal(0.0003, 0.012, days)
-    for i in range(1, len(returns)):
-        returns[i] += 0.05 * returns[i-1]
-    vol = np.abs(np.random.normal(1, 0.3, days))
-    returns = returns * vol
-    prices = 100 * np.cumprod(1 + returns)
-    df = pd.DataFrame({'Close': prices}, index=dates)
-    return df
-
-@st.cache_data(ttl=3600)
-def generate_breadth_indicators(spy_df):
+    dates = pd.date_range(end=datetime.now(), periods=weeks, freq='W-FRI')
+    
+    # Mock SPY weekly returns (less noisy than daily)
+    weekly_ret = np.random.normal(0.0015, 0.025, weeks)  # ~7.8% annual, 12.5% weekly vol
+    prices = 100 * np.cumprod(1 + weekly_ret)
+    spy_df = pd.DataFrame({'Close': prices}, index=dates)
+    
+    # Mock breadth indicators (weekly aggregation)
     df = spy_df.copy()
-    returns = df['Close'].pct_change().fillna(0)
+    ret = df['Close'].pct_change().fillna(0)
+    mom = ret.rolling(4).mean()  # 4-week momentum
     
-    df['nyhl_cum'] = (returns.rolling(20).sum().cumsum() * 15000 + 28000).ffill()
-    df['nyhl_sma200'] = df['nyhl_cum'].rolling(200).mean()
-    df['nyhl_sma50'] = df['nyhl_cum'].rolling(50).mean()
+    # $NYHL Cumulative (smoothed)
+    df['nyhl_cum'] = (mom.cumsum() * 20000 + 30000).ffill()
+    df['nyhl_sma20'] = df['nyhl_cum'].rolling(20).mean()  # 20-week = ~5 months
     
-    momentum = returns.rolling(20).mean()
-    df['bpspx_value'] = (55 + momentum * 35 + np.random.normal(0, 6, len(df))).clip(15, 85)
-    df['bpspx_rsi14'] = (50 + momentum * 45 + np.random.normal(0, 9, len(df))).clip(15, 85)
-    df['bpspx_macd_hist'] = momentum.rolling(12).mean() - momentum.rolling(26).mean()
-    df['bpspx_sma50'] = df['bpspx_value'].rolling(50).mean()
+    # $BPSPX (mean-reverting, weekly)
+    df['bpspx_rsi'] = (50 + mom * 35).clip(25, 75)
+    df['bpspx_macd'] = mom.rolling(3).mean() - mom.rolling(6).mean()
     
-    ma150 = df['Close'].rolling(150).mean()
-    above = (df['Close'] > ma150).astype(float)
-    df['oexa150r_value'] = (above.rolling(25).mean() * 100 + np.random.normal(0, 10, len(df))).clip(15, 85)
-    df['oexa150r_cci14'] = ((df['Close'] - df['Close'].rolling(14).mean()) / df['Close'].rolling(14).std().replace(0, 1) * 100)
+    # $OEXA150R (participation)
+    df['oexa_val'] = (50 + mom * 80).clip(25, 75)
+    df['oexa_cci'] = ((df['Close'] - df['Close'].rolling(4).mean()) / df['Close'].rolling(4).std().replace(0,1) * 100)
     
-    vol = returns.rolling(20).std()
-    df['spy_vxx_ratio'] = (1 / (vol * 100 + 0.01) + np.random.normal(0, 4, len(df))).clip(8, 45)
-    df['spy_vxx_sma50'] = df['spy_vxx_ratio'].rolling(50).mean()
-    df['vix'] = (18 - momentum * 18 + np.random.normal(0, 5, len(df))).clip(12, 45)
+    # Risk sentiment
+    vol = ret.rolling(4).std()
+    df['spy_vxx'] = (1 / (vol * 100 + 0.01)).clip(12, 35)
+    df['spy_vxx_sma10'] = df['spy_vxx'].rolling(10).mean()
+    df['vix'] = (18 - mom * 12).clip(14, 35)
     
-    df['hy_spread_bps'] = (380 - momentum * 120 + np.random.normal(0, 35, len(df))).clip(220, 580)
-    df['mcclellan_osc'] = momentum * 90 + np.random.normal(0, 22, len(df))
-    df['semis_spx_ratio'] = (1.55 + momentum * 0.6 + np.random.normal(0, 0.25, len(df))).clip(0.9, 2.3)
-    df['semis_spx_sma50'] = df['semis_spx_ratio'].rolling(50).mean()
-    df['smallcap_largecap_ratio'] = (0.46 + momentum * 0.12 + np.random.normal(0, 0.06, len(df))).clip(0.32, 0.58)
+    # Canary indicators (weekly)
+    df['hy_spread'] = (380 - mom * 80).clip(280, 520)
+    df['mcclellan'] = mom * 70
     
     return df.dropna()
 
 # ============================================
-# SIGNAL ENGINE
+# SIGNAL ENGINE (WEEKLY/MONTHLY TIMEFRAME)
 # ============================================
 
-def check_canary_warnings(row):
-    warnings = 0
-    details = []
-    if row.get('hy_spread_bps', 380) > 460:
-        warnings += 2
-        details.append("Credit Stress")
-    if row.get('semis_spx_ratio', 1.5) < row.get('semis_spx_sma50', 1.5):
-        warnings += 1
-        details.append("Semis Weak")
-    if row.get('smallcap_largecap_ratio', 0.46) < 0.41:
-        warnings += 1
-        details.append("Small Cap Weak")
-    if row.get('mcclellan_osc', 0) < -55:
-        warnings += 1
-        details.append("Breadth Weak")
-    return warnings, details
+def get_rotation_signal_weekly(data):
+    """
+    Returns: 'SPY', 'IEF', or 'WAIT' for weekly/monthly rotations
+    Designed for swing/position trading, not day trading
+    """
+    # Canary warnings (early warning system) - higher thresholds for weekly
+    canary_score = 0
+    if data.get('hy_spread', 380) > 470: canary_score += 2  # Credit stress (weekly threshold)
+    if data.get('mcclellan', 0) < -40: canary_score += 1    # Breadth weak (weekly)
+    if data.get('vix', 18) > 24 and data.get('spy_vxx', 25) < data.get('spy_vxx_sma10', 25): 
+        canary_score += 1  # Risk-off (weekly)
+    
+    # Core signals (weekly timeframe)
+    regime_bull = data['nyhl_cum'] > data['nyhl_sma20']  # 20-week SMA = ~5 months
+    bpspx_bear = data['bpspx_rsi'] < 35 and data['bpspx_macd'] < 0  # Weekly oversold + momentum
+    oexa_oversold = data['oexa_val'] < 30 and data['oexa_cci'] < -90  # Weekly oversold
+    risk_off = data['spy_vxx'] < data['spy_vxx_sma10']
+    
+    # Decision logic (100% allocation, weekly signals)
+    if canary_score >= 3 or (not regime_bull and risk_off):
+        return "IEF", {'SPY': 0, 'IEF': 100}  # Defensive rotation
+    elif oexa_oversold and regime_bull:
+        return "SPY", {'SPY': 100, 'IEF': 0}  # Aggressive dip entry
+    elif regime_bull and not bpspx_bear:
+        return "SPY", {'SPY': 100, 'IEF': 0}  # Bullish trend continuation
+    elif bpspx_bear or risk_off:
+        return "WAIT", {'SPY': 50, 'IEF': 50}  # Transition zone (no action)
+    else:
+        return "WAIT", {'SPY': 50, 'IEF': 50}  # Default neutral
 
-def generate_signals(df):
-    signals, allocations, canary_scores = [], [], []
+def generate_rotation_history_weekly(df):
+    """Generate historical weekly rotation signals"""
+    signals, allocations = [], []
     
     for idx, row in df.iterrows():
-        regime_bull = row['nyhl_cum'] > row['nyhl_sma200']
-        bpspx_bear = (row['bpspx_rsi14'] < 38 and row['bpspx_macd_hist'] < 0)
-        oexa_oversold = row['oexa150r_value'] < 33 and row['oexa150r_cci14'] < -110
-        risk_off = row['spy_vxx_ratio'] < row['spy_vxx_sma50'] and row['vix'] > 21
-        
-        canary_score, canary_details = check_canary_warnings(row)
-        canary_scores.append(canary_score)
-        
-        bull_score = int(regime_bull) * 4 + int(oexa_oversold) * 3
-        bear_score = int(not regime_bull) * 4 + int(bpspx_bear) * 3 + int(risk_off) * 3 + int(canary_score >= 3) * 3
-        
-        if canary_score >= 5:
-            signal, alloc = "WARNING - CANARIES", {'SPY': 0.40, 'IEF': 0.45, 'CASH': 0.15}
-        elif not regime_bull or (bear_score >= 9 and bull_score < 4):
-            signal, alloc = "SELL", {'SPY': 0.20, 'IEF': 0.60, 'CASH': 0.20}
-        elif bear_score > bull_score and regime_bull:
-            signal, alloc = "WARNING", {'SPY': 0.40, 'IEF': 0.45, 'CASH': 0.15}
-        elif oexa_oversold and regime_bull:
-            signal, alloc = "BUY DIP", {'SPY': 0.80, 'IEF': 0.15, 'CASH': 0.05}
-        elif bull_score - bear_score >= 3 and regime_bull:
-            signal, alloc = "BUY", {'SPY': 0.85, 'IEF': 0.10, 'CASH': 0.05}
-        else:
-            signal, alloc = "HOLD", {'SPY': 0.65, 'IEF': 0.25, 'CASH': 0.10}
-        
+        data = row.to_dict()
+        signal, alloc = get_rotation_signal_weekly(data)
         signals.append(signal)
         allocations.append(alloc)
     
     df = df.copy()
     df['signal'] = signals
     df['allocation'] = allocations
-    df['canary_score'] = canary_scores
-    return df
-
-def calculate_strategy_returns(df):
-    df = df.copy()
-    df['spy_return'] = df['Close'].pct_change().fillna(0)
-    ief_returns = np.where(df['spy_return'] < 0, -0.35 * df['spy_return'], 0.02/252)
+    df['SPY_%'] = df['allocation'].apply(lambda x: x['SPY'])
+    df['IEF_%'] = df['allocation'].apply(lambda x: x['IEF'])
     
-    def calc_daily_return(row):
-        idx = row.name
-        spy_ret = row['spy_return']
-        ief_ret = ief_returns[df.index.get_loc(idx)] if idx in df.index else 0.02/252
-        return row['allocation']['SPY'] * spy_ret + row['allocation']['IEF'] * ief_ret
+    # Calculate weekly returns
+    df['spy_ret'] = df['Close'].pct_change().fillna(0)
+    # Simplified IEF weekly return: positive when SPY negative (hedging)
+    df['ief_ret'] = np.where(df['spy_ret'] < 0, -0.25 * df['spy_ret'], 0.0008)  # ~0.08% weekly drift
     
-    df['strategy_return'] = df.apply(calc_daily_return, axis=1)
-    df['buyhold_cum'] = (1 + df['spy_return']).cumprod() * 100
-    df['strategy_cum'] = (1 + df['strategy_return']).cumprod() * 100
-    df['SPY_%'] = df['allocation'].apply(lambda x: x['SPY'] * 100)
-    df['IEF_%'] = df['allocation'].apply(lambda x: x['IEF'] * 100)
-    df['CASH_%'] = df['allocation'].apply(lambda x: x['CASH'] * 100)
+    def calc_ret(row):
+        return (row['allocation']['SPY']/100 * row['spy_ret'] + 
+                row['allocation']['IEF']/100 * row['ief_ret'])
+    
+    df['strat_ret'] = df.apply(calc_ret, axis=1)
+    df['buyhold_cum'] = (1 + df['spy_ret']).cumprod() * 100
+    df['strat_cum'] = (1 + df['strat_ret']).cumprod() * 100
+    
     return df
 
 # ============================================
-# CURRENT SIGNAL
+# CURRENT SIGNAL (From Your Charts - Weekly View)
 # ============================================
 
-def get_current_signal():
+def get_current_rotation_weekly():
+    """Current signal based on your StockCharts PDFs (weekly interpretation)"""
     data = {
-        'timestamp': datetime(2026, 2, 24, 11, 52),
-        'spx_price': 6877.92,
-        'nyhl_cum': 32941, 'nyhl_sma200': 27441,
-        'bpspx_value': 60.00, 'bpspx_rsi14': 36.47, 'bpspx_macd_hist': -0.470, 'bpspx_sma50': 60.98,
-        'oexa150r_value': 63.00, 'oexa150r_cci14': -163.74,
-        'spy_vxx_ratio': 24.05, 'spy_vxx_sma50': 25.06, 'vix': 18.45,
-        'hy_spread_bps': 385, 'mcclellan_osc': -15.4,
-        'semis_spx_ratio': 1.65, 'semis_spx_sma50': 1.70,
-        'smallcap_largecap_ratio': 0.42,
+        'nyhl_cum': 32941, 'nyhl_sma20': 30500,  # Weekly SMA approximation
+        'bpspx_rsi': 36.47, 'bpspx_macd': -0.470,
+        'oexa_val': 63.00, 'oexa_cci': -163.74,
+        'vix': 18.45, 'spy_vxx': 24.05, 'spy_vxx_sma10': 24.80,
+        'hy_spread': 385, 'mcclellan': -15.4,
     }
-    
-    canary_score, canary_details = check_canary_warnings(data)
-    regime_bull = data['nyhl_cum'] > data['nyhl_sma200']
-    bpspx_bear = data['bpspx_rsi14'] < 40 and data['bpspx_macd_hist'] < 0
-    risk_off = data['spy_vxx_ratio'] < data['spy_vxx_sma50']
-    
-    if canary_score >= 5:
-        signal, sig_class, alloc = "WARNING - CANARIES", "signal-warning", {'SPY': 40, 'IEF': 45, 'CASH': 15}
-    elif not regime_bull:
-        signal, sig_class, alloc = "SELL", "signal-sell", {'SPY': 20, 'IEF': 60, 'CASH': 20}
-    elif bpspx_bear and risk_off and canary_score >= 3:
-        signal, sig_class, alloc = "WARNING", "signal-warning", {'SPY': 40, 'IEF': 45, 'CASH': 15}
-    else:
-        signal, sig_class, alloc = "HOLD", "signal-hold", {'SPY': 65, 'IEF': 25, 'CASH': 10}
-    
-    return signal, sig_class, alloc, data, canary_score, canary_details
+    return get_rotation_signal_weekly(data)
 
 # ============================================
-# TABS
+# TAB 1: CURRENT ROTATION (WEEKLY)
 # ============================================
 
 def render_current_tab():
-    signal, sig_class, alloc, data, canary_score, canary_details = get_current_signal()
+    signal, alloc = get_current_rotation_weekly()
     
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown(f"<div class='{sig_class}'>{signal}</div>", unsafe_allow_html=True)
-        st.caption(f"Updated: {data['timestamp'].strftime('%Y-%m-%d %H:%M')}")
-    with col2:
-        regime = "🟢 Bullish" if data['nyhl_cum'] > data['nyhl_sma200'] else "🔴 Bearish"
-        st.metric("Primary Regime", regime)
-    
-    st.subheader("🚨 Canary Indicators")
-    c1, c2, c3, c4 = st.columns(4)
-    with c1: st.metric("Credit Spreads", f"{data['hy_spread_bps']} bps", "✅ Normal" if data['hy_spread_bps'] < 450 else "🔴 Stress")
-    with c2: st.metric("Semis/SPX", f"{data['semis_spx_ratio']:.2f}", "✅ Strong" if data['semis_spx_ratio'] > data['semis_spx_sma50'] else "⚠️ Weak")
-    with c3: st.metric("Small/Large", f"{data['smallcap_largecap_ratio']:.2f}", "✅ Normal" if data['smallcap_largecap_ratio'] > 0.40 else "⚠️ Weak")
-    with c4: st.metric("McClellan", f"{data['mcclellan_osc']:+.1f}", "✅ Normal" if data['mcclellan_osc'] > -50 else "⚠️ Weak")
-    
-    if canary_score >= 3:
-        st.warning(f"⚠️ **{canary_score} Canary Warnings**: {', '.join(canary_details)}")
+    # Big signal banner
+    if signal == "SPY":
+        sig_class = "signal-spy"
+        msg = "🟢 ROTATE TO SPY (100%) • Weekly Signal"
+    elif signal == "IEF":
+        sig_class = "signal-ief"
+        msg = "🔵 ROTATE TO IEF (100%) • Weekly Signal"
     else:
-        st.success("✅ Canary indicators quiet")
+        sig_class = "signal-wait"
+        msg = "🟡 HOLD CURRENT • No Weekly Change"
     
-    st.subheader("🎯 Allocation")
-    alloc_df = pd.DataFrame([{'ETF': 'SPY', 'Allocation': alloc['SPY']}, {'ETF': 'IEF', 'Allocation': alloc['IEF']}, {'ETF': 'CASH', 'Allocation': alloc['CASH']}])
-    ac1, ac2 = st.columns(2)
-    with ac1:
-        fig = px.pie(alloc_df, values='Allocation', names='ETF', color='ETF', color_discrete_map={'SPY':'#10b981','IEF':'#3b82f6','CASH':'#6b7280'}, hole=0.4)
-        fig.update_layout(showlegend=False, margin=dict(t=0,b=0,l=0,r=0))
-        st.plotly_chart(fig, use_container_width=True)
-    with ac2:
-        fig = px.bar(alloc_df, x='Allocation', y='ETF', orientation='h', color='ETF', color_discrete_map={'SPY':'#10b981','IEF':'#3b82f6','CASH':'#6b7280'}, text='Allocation', range_x=[0,100])
-        fig.update_layout(showlegend=False, margin=dict(t=0,b=0,l=0,r=0))
-        st.plotly_chart(fig, use_container_width=True)
+    st.markdown(f"<div class='{sig_class}'>{msg}</div>", unsafe_allow_html=True)
+    st.caption(f"Updated: {datetime.now().strftime('%Y-%m-%d')} • Signals update weekly on Friday close")
+    
+    # Simple allocation display
+    col1, col2 = st.columns(2)
+    with col1:
+        status = "✅ Full Exposure" if alloc['SPY'] == 100 else "⚠️ Reduced" if alloc['SPY'] == 50 else "❌ None"
+        st.metric("SPY Allocation", f"{alloc['SPY']:.0f}%", status)
+    with col2:
+        status = "✅ Full Hedge" if alloc['IEF'] == 100 else "⚠️ Partial" if alloc['IEF'] == 50 else "❌ None"
+        st.metric("IEF Allocation", f"{alloc['IEF']:.0f}%", status)
+    
+    # Why this signal? (weekly context)
+    st.subheader("🚨 Why This Weekly Signal?")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        regime = "✅ Bullish" if 32941 > 30500 else "❌ Bearish"
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>Regime ($NYHL)</strong><br>
+            {regime}<br>
+            <small>20-week SMA filter</small>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        momentum = "⚠️ Weak" if 36.47 < 40 else "✅ Strong"
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>Momentum ($BPSPX)</strong><br>
+            {momentum}<br>
+            <small>Weekly RSI + MACD</small>
+        </div>
+        """, unsafe_allow_html=True)
+    with c3:
+        risk = "⚠️ Risk-Off" if 24.05 < 24.80 else "✅ Risk-On"
+        st.markdown(f"""
+        <div class="metric-card">
+            <strong>Risk (SPY:VXX)</strong><br>
+            {risk}<br>
+            <small>10-week SMA filter</small>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Action guidance
+    st.markdown("### ⚡ Weekly Action Guidance")
+    if signal == "SPY":
+        st.success("""
+        **This Week**: Consider rotating to 100% SPY if you're not already.
+        - Best executed on Friday close or Monday open
+        - Hold through the week unless canaries flash warning
+        - Next signal check: Next Friday
+        """)
+        st.button("✅ Execute: Buy SPY / Sell IEF", type="primary", use_container_width=True)
+    elif signal == "IEF":
+        st.warning("""
+        **This Week**: Consider rotating to 100% IEF for defense.
+        - Best executed on Friday close or Monday open
+        - Hold through volatility, re-evaluate next Friday
+        - Next signal check: Next Friday
+        """)
+        st.button("✅ Execute: Buy IEF / Sell SPY", type="primary", use_container_width=True)
+    else:
+        st.info("""
+        **This Week**: No rotation needed. Hold current allocation.
+        - Wait for clearer weekly signal
+        - Re-check next Friday after market close
+        - Use this week to review canary indicators
+        """)
+        st.button("⏸️ No Action Needed", disabled=True, use_container_width=True)
+
+# ============================================
+# TAB 2: HISTORICAL WEEKLY ROTATIONS
+# ============================================
 
 def render_backtest_tab():
-    st.subheader("📈 Historical Backtest (~5 Years)")
-    if st.button("📊 Load Backtest Data", type="primary"):
-        with st.spinner("Loading..."):
-            spy_df = generate_mock_spy_data(1260)
-            breadth_df = generate_breadth_indicators(spy_df)
-            signal_df = generate_signals(breadth_df)
-            results_df = calculate_strategy_returns(signal_df)
+    st.subheader("📈 Historical Weekly Rotations (~5 Years)")
+    st.markdown("*Weekly signals only • Designed for swing/position trading*")
+    
+    if st.button("📊 Load Weekly History", type="primary"):
+        with st.spinner("Calculating weekly signals..."):
+            df = generate_mock_weekly_data(260)  # 5 years weekly
+            results = generate_rotation_history_weekly(df)
             
-            st.markdown("### SPY Price with Signals")
-            buy_sig = results_df[results_df['signal'].isin(['BUY', 'BUY DIP'])]
-            sell_sig = results_df[results_df['signal'].isin(['SELL', 'WARNING'])]
+            # Chart 1: Price with weekly rotation markers
+            st.markdown("### SPY Weekly Price with Rotation Signals")
+            spy_signals = results[results['signal'] == 'SPY']
+            ief_signals = results[results['signal'] == 'IEF']
             
             fig1 = go.Figure()
-            fig1.add_trace(go.Scatter(x=results_df.index, y=results_df['Close'], name='SPY', line=dict(color='#1f77b4')))
-            if not buy_sig.empty: fig1.add_trace(go.Scatter(x=buy_sig.index, y=buy_sig['Close'], mode='markers', name='BUY', marker=dict(color='#10b981', size=8, symbol='triangle-up')))
-            if not sell_sig.empty: fig1.add_trace(go.Scatter(x=sell_sig.index, y=sell_sig['Close'], mode='markers', name='SELL', marker=dict(color='#dc2626', size=8, symbol='x')))
-            fig1.update_layout(height=450, hovermode='x unified')
+            fig1.add_trace(go.Scatter(x=results.index, y=results['Close'], name='SPY Weekly', line=dict(color='#1f77b4', width=2)))
+            if not spy_signals.empty:
+                fig1.add_trace(go.Scatter(x=spy_signals.index, y=spy_signals['Close'], mode='markers', name='→ SPY', marker=dict(color='#10b981', size=12, symbol='triangle-up')))
+            if not ief_signals.empty:
+                fig1.add_trace(go.Scatter(x=ief_signals.index, y=ief_signals['Close'], mode='markers', name='→ IEF', marker=dict(color='#ef4444', size=12, symbol='x')))
+            fig1.update_layout(height=450, hovermode='x unified', title="Weekly Signals Only (Less Noise)")
             st.plotly_chart(fig1, use_container_width=True)
             
-            st.markdown("### Strategy vs Buy-and-Hold")
+            # Chart 2: Allocation over time (weekly steps)
+            st.markdown("### Weekly Allocation (100% SPY or IEF)")
             fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(x=results_df.index, y=results_df['buyhold_cum'], name='Buy-and-Hold', line=dict(color='#6b7280')))
-            fig2.add_trace(go.Scatter(x=results_df.index, y=results_df['strategy_cum'], name='Strategy', line=dict(color='#10b981')))
-            fig2.update_layout(height=400, hovermode='x unified')
+            fig2.add_trace(go.Scatter(x=results.index, y=results['SPY_%'], name='% in SPY', line=dict(color='#10b981', width=3, shape='hv')))
+            fig2.add_trace(go.Scatter(x=results.index, y=results['IEF_%'], name='% in IEF', line=dict(color='#3b82f6', width=3, shape='hv')))
+            fig2.update_layout(height=300, yaxis_title='% Allocation', hovermode='x unified', title="Step Changes Only (Weekly)")
             st.plotly_chart(fig2, use_container_width=True)
             
-            total_bh = (results_df['buyhold_cum'].iloc[-1] - 100) / 100 * 100
-            total_strat = (results_df['strategy_cum'].iloc[-1] - 100) / 100 * 100
-            st.metric("Total Return", f"{total_strat:+.1f}%", delta=f"{total_strat - total_bh:+.1f}% vs BH")
-            st.success("✅ Backtest complete!")
+            # Performance metrics (weekly compounding)
+            total_bh = (results['buyhold_cum'].iloc[-1] - 100)
+            total_strat = (results['strat_cum'].iloc[-1] - 100)
+            years = 5
+            cagr_bh = ((results['buyhold_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
+            cagr_strat = ((results['strat_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Return (5Y)", f"{total_strat:+.1f}%", delta=f"{total_strat - total_bh:+.1f}% vs BH")
+            with col2:
+                st.metric("CAGR", f"{cagr_strat:+.1f}%", delta=f"{cagr_strat - cagr_bh:+.1f}% vs BH")
+            with col3:
+                # Count rotations
+                rotations = len(results[results['signal'].shift(1) != results['signal']])
+                st.metric("Total Rotations (5Y)", f"{rotations}", delta=f"~{rotations/5:.1f} per year")
+            
+            st.success("✅ Weekly history loaded • Signals update Friday close")
     else:
-        st.info("👆 Click button to load")
+        st.info("👆 Click to load weekly rotation history")
 
-def render_position_tracker_tab():
-    st.subheader("📋 Daily Position Tracker")
-    st.markdown("*See EXACTLY what % was in SPY/IEF/CASH each day*")
+# ============================================
+# TAB 3: WEEKLY POSITION LOG (Your CSV Request)
+# ============================================
+
+def render_positions_tab():
+    st.subheader("📋 Weekly Position Log")
+    st.markdown("*One row per week • Easy to review and export*")
     
-    if st.button("📊 Load Position History", type="primary"):
+    if st.button("📊 Load Weekly Log", type="primary"):
         with st.spinner("Loading..."):
-            try:
-                spy_df = generate_mock_spy_data(252)
-                breadth_df = generate_breadth_indicators(spy_df)
-                signal_df = generate_signals(breadth_df)
-                results_df = calculate_strategy_returns(signal_df)
-                
-                recent = results_df.tail(90).copy()
-                recent['Date'] = [d.strftime('%Y-%m-%d') for d in recent.index.date]
-                recent['SPY Return'] = recent['spy_return'].apply(lambda x: f"{x*100:+.2f}%")
-                recent['Strategy Return'] = recent['strategy_return'].apply(lambda x: f"{x*100:+.2f}%")
-                recent['SPY %'] = recent['SPY_%'].apply(lambda x: f"{x:.0f}%")
-                recent['IEF %'] = recent['IEF_%'].apply(lambda x: f"{x:.0f}%")
-                recent['CASH %'] = recent['CASH_%'].apply(lambda x: f"{x:.0f}%")
-                recent['Signal'] = recent['signal']  # FIX: Create capitalized version
-                
-                display_cols = ['Date', 'Signal', 'SPY %', 'IEF %', 'CASH %', 'SPY Return', 'Strategy Return']
-                st.dataframe(recent[display_cols].sort_values('Date', ascending=False), use_container_width=True, hide_index=True, height=400)
-                
-                st.markdown("### Allocation History")
-                fig_alloc = go.Figure()
-                fig_alloc.add_trace(go.Scatter(x=recent['Date'], y=recent['SPY_%'], name='SPY', stackgroup='one', line=dict(color='#10b981')))
-                fig_alloc.add_trace(go.Scatter(x=recent['Date'], y=recent['IEF_%'], name='IEF', stackgroup='one', line=dict(color='#3b82f6')))
-                fig_alloc.add_trace(go.Scatter(x=recent['Date'], y=recent['CASH_%'], name='CASH', stackgroup='one', line=dict(color='#6b7280')))
-                fig_alloc.update_layout(height=400, hovermode='x unified')
-                st.plotly_chart(fig_alloc, use_container_width=True)
-                
-                st.markdown("### Signal Changes")
-                signal_changes = recent[recent['signal'].shift(1) != recent['signal']].tail(10)  # FIX: lowercase
-                if not signal_changes.empty:
-                    st.dataframe(signal_changes[['Date', 'signal', 'SPY_%', 'IEF_%']], use_container_width=True, hide_index=True)
-                else:
-                    st.info("No signal changes in last 90 days")
-                
-                st.success("✅ Position history loaded!")
-            except Exception as e:
-                st.error(f"Error: {e}")
+            df = generate_mock_weekly_data(52)  # 1 year weekly
+            results = generate_rotation_history_weekly(df)
+            recent = results.tail(12).copy()  # Last 12 weeks
+            
+            # Clean table for weekly review
+            display = recent.copy()
+            display['Week'] = display.index.strftime('%Y-%m-%d')
+            display['Signal'] = display['signal']
+            display['SPY %'] = display['SPY_%'].apply(lambda x: f"{x:.0f}%")
+            display['IEF %'] = display['IEF_%'].apply(lambda x: f"{x:.0f}%")
+            display['SPY Weekly Return'] = display['spy_ret'].apply(lambda x: f"{x*100:+.2f}%")
+            display['Strategy Weekly Return'] = display['strat_ret'].apply(lambda x: f"{x*100:+.2f}%")
+            
+            cols = ['Week', 'Signal', 'SPY %', 'IEF %', 'SPY Weekly Return', 'Strategy Weekly Return']
+            st.dataframe(display[cols].sort_values('Week', ascending=False), use_container_width=True, hide_index=True)
+            
+            # Export
+            export_df = recent[['SPY_%', 'IEF_%', 'spy_ret', 'strat_ret']].copy()
+            export_df.columns = ['SPY %', 'IEF %', 'SPY Return', 'Strategy Return']
+            csv = export_df.to_csv().encode('utf-8')
+            st.download_button("📥 Export Weekly CSV", csv, "weekly_rotations.csv", "text/csv")
+            
+            st.info("""
+            💡 **How to Use This Log**:
+            - Review each Friday after market close
+            - If Signal changed → consider rotation Monday
+            - If Signal unchanged → hold current allocation
+            - Edge comes from avoiding major drawdowns, not daily outperformance
+            """)
     else:
-        st.info("👆 Click button to load")
+        st.info("👆 Click to load weekly position log")
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    st.title("📊 Market Regime Dashboard")
-    tab1, tab2, tab3 = st.tabs(["🎯 Current Signal", "📈 Historical Backtest", "📋 Daily Position Tracker"])
-    with tab1: render_current_tab()
-    with tab2: render_backtest_tab()
-    with tab3: render_position_tracker_tab()
+    st.title("🔄 SPY/IEF Weekly Rotation Dashboard")
+    st.markdown("*Simple 100% allocation rotations • Weekly signals for swing/position trading*")
+    
+    tab1, tab2, tab3 = st.tabs(["🎯 Current Weekly Signal", "📈 Weekly History", "📋 Weekly Log"])
+    
+    with tab1:
+        render_current_tab()
+    with tab2:
+        render_backtest_tab()
+    with tab3:
+        render_positions_tab()
     
     with st.sidebar:
+        st.header("⚙️ Settings")
+        st.markdown("**Signal Frequency:** Weekly (Friday close)")
+        st.markdown("**Timeframe:** Swing/Position Trading (weeks to months)")
         if st.button("🔄 Refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-        st.caption("⚠️ Not investment advice")
+        st.markdown("---")
+        st.markdown("**Weekly Rotation Logic:**")
+        st.markdown("""
+        → **SPY (100%)**: Bullish regime + no canary warnings
+        → **IEF (100%)**: Bearish regime OR credit stress + risk-off  
+        → **WAIT (50/50)**: Mixed signals, no action needed
+        """)
+        st.markdown("---")
+        st.caption("⚠️ Not investment advice • Test before live use")
 
 if __name__ == "__main__":
     main()
