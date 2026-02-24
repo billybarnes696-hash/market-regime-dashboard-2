@@ -20,22 +20,35 @@ def get_signal():
     risk_off = spy_vxx < vxx_sma50
     
     if not regime_bull:
-        return "SELL", "signal-sell", {'SPY':20,'IEF':60,'CASH':20}
+        return "SELL", {'SPY':20,'IEF':60,'CASH':20}
     elif bpspx_bear and risk_off:
-        return "WARNING", "signal-warning", {'SPY':40,'IEF':45,'CASH':15}
+        return "WARNING", {'SPY':40,'IEF':45,'CASH':15}
     elif oexa_val < 35 and oexa_cci < -100:
-        return "BUY DIP", "signal-buy", {'SPY':80,'IEF':15,'CASH':5}
+        return "BUY DIP", {'SPY':80,'IEF':15,'CASH':5}
     else:
-        return "HOLD", "signal-hold", {'SPY':65,'IEF':25,'CASH':10}
+        return "HOLD", {'SPY':65,'IEF':25,'CASH':10}
 
 # === MAIN APP ===
 def main():
     st.title("📊 Market Regime Dashboard")
     
-    signal, sig_class, alloc = get_signal()
+    signal, alloc = get_signal()
+    
+    # Determine signal color (FIXED - no f-string escaping issues)
+    if "SELL" in signal:
+        sig_color = "#dc2626"
+    elif "WARNING" in signal:
+        sig_color = "#f97316"
+    elif "HOLD" in signal:
+        sig_color = "#f59e0b"
+    else:
+        sig_color = "#10b981"
     
     # Signal banner
-    st.markdown(f"<div style='background:{\"#dc2626\" if \"SELL\" in signal else \"#f97316\" if \"WARNING\" in signal else \"#f59e0b\" if \"HOLD\" in signal else \"#10b981\"};color:white;padding:1rem;border-radius:8px;font-weight:bold;font-size:1.3rem;text-align:center'>{signal}</div>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='background:{sig_color};color:white;padding:1rem;border-radius:8px;font-weight:bold;font-size:1.3rem;text-align:center'>{signal}</div>",
+        unsafe_allow_html=True
+    )
     
     # Canary indicators
     st.subheader("🚨 Canary Indicators")
