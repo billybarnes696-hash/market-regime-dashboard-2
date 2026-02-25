@@ -18,40 +18,38 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================
-# REAL DATA FROM YFINANCE
+# REAL DATA FROM YFINANCE (FIXED)
 # ============================================
 
 @st.cache_data(ttl=3600)
 def fetch_real_data(period="5y"):
-    """Fetch real SPY and IEF data from yfinance"""
+    """Fetch real SPY and IEF data from yfinance - FIXED for MultiIndex columns"""
     try:
-        # Download SPY and IEF
+        # Download SPY and IEF separately to avoid MultiIndex issues
         spy = yf.download("SPY", period=period, progress=False)
         ief = yf.download("IEF", period=period, progress=False)
         
         if spy.empty or ief.empty:
             st.error("Failed to fetch data from yfinance")
-            return None, None
+            return None
         
-        # Clean data
-        spy = spy[['Close']].rename(columns={'Close': 'SPY'})
-        ief = ief[['Close']].rename(columns={'Close': 'IEF'})
+        # Extract Close prices and rename columns (flatten MultiIndex)
+        spy_close = spy['Close'].rename('SPY')
+        ief_close = ief['Close'].rename('IEF')
         
-        # Align dates
-        df = pd.concat([spy, ief], axis=1).dropna()
+        # Align dates and combine
+        df = pd.concat([spy_close, ief_close], axis=1).dropna()
         
-        return df, spy, ief
+        return df
     except Exception as e:
         st.error(f"Error fetching data: {e}")
-        return None, None, None
+        return None
 
 def calculate_smooth_signal(df):
-    """
-    Calculate smooth composite signal from price data.
-    Uses PPO-style calculation on SPY with IEF as confirmation.
-    """
-    # Calculate returns
+    """Calculate smooth composite signal from price data - FIXED"""
     df = df.copy()
+    
+    # Calculate returns
     df['spy_ret'] = df['SPY'].pct_change()
     df['ief_ret'] = df['IEF'].pct_change()
     
@@ -67,7 +65,7 @@ def calculate_smooth_signal(df):
     df['ppo_signal'] = df['ppo'].ewm(span=9, adjust=False).mean()
     df['ppo_hist'] = df['ppo'] - df['ppo_signal']
     
-    # Relative strength SPY vs IEF
+    # Relative strength SPY vs IEF - FIXED: use simple column names
     df['spy_ief_ratio'] = df['SPY'] / df['IEF']
     df['ratio_sma20'] = df['spy_ief_ratio'].rolling(20).mean()
     df['ratio_signal'] = (df['spy_ief_ratio'] - df['ratio_sma20']) / df['ratio_sma20'] * 100
@@ -80,7 +78,6 @@ def calculate_smooth_signal(df):
     df['trend'] = (df['SPY'] - df['spy_sma200']) / df['spy_sma200'] * 100
     
     # === COMPOSITE SIGNAL ===
-    # Combine multiple factors (smoothed like PPO)
     composite = (
         df['ppo_hist'] * 0.40 +           # PPO histogram (momentum)
         df['ratio_signal'] * 0.25 +        # SPY/IEF relative strength
@@ -137,7 +134,7 @@ def calculate_strategy_returns(df):
 def get_current_signal():
     """Get latest signal from real data"""
     try:
-        df, spy, ief = fetch_real_data(period="6mo")
+        df = fetch_real_data(period="6mo")
         if df is None:
             return None, None, None
         
@@ -198,7 +195,7 @@ def render_chart_tab():
     
     if st.button("📊 Load Real Data Chart", type="primary"):
         with st.spinner("Fetching real data from yfinance..."):
-            df, spy, ief = fetch_real_data(period="5y")
+            df = fetch_real_data(period="5y")
             
             if df is None:
                 st.error("Failed to fetch data. Please try again.")
