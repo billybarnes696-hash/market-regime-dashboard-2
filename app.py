@@ -1,401 +1,370 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import yfinance as yf
 
 # ============================================
 # CONFIG
 # ============================================
-st.set_page_config(page_title="SPY/IEF Signal Dashboard", layout="wide", page_icon="🔄")
+st.set_page_config(page_title="SPY/IEF Signal Dashboard (Real Data)", layout="wide", page_icon="🔄")
 
 st.markdown("""
 <style>
     .signal-spy {background: linear-gradient(135deg, #10b981, #059669); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
     .signal-ief {background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; padding: 0.75rem; border-radius: 8px; font-weight: bold; text-align: center; font-size: 1.3rem;}
+    .smallnote {opacity: 0.9; font-size: 0.95rem;}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================
-# REAL DATA FROM YFINANCE (FIXED)
+# HELPERS
 # ============================================
+
+def zscore(s: pd.Series, window: int = 252) -> pd.Series:
+    """Rolling z-score with safe handling."""
+    mu = s.rolling(window, min_periods=max(20, window//5)).mean()
+    sd = s.rolling(window, min_periods=max(20, window//5)).std()
+    z = (s - mu) / sd
+    return z.replace([np.inf, -np.inf], np.nan)
+
+def ema(s: pd.Series, span: int) -> pd.Series:
+    return s.ewm(span=span, adjust=False).mean()
+
+def max_drawdown(equity_curve: pd.Series) -> float:
+    peak = equity_curve.cummax()
+    dd = equity_curve / peak - 1.0
+    return float(dd.min())
 
 @st.cache_data(ttl=3600)
-def fetch_real_data(period="5y"):
-    """Fetch real SPY and IEF data from yfinance - FIXED for MultiIndex columns"""
-    try:
-        # Download SPY and IEF separately to avoid MultiIndex issues
-        spy = yf.download("SPY", period=period, progress=False)
-        ief = yf.download("IEF", period=period, progress=False)
-        
-        if spy.empty or ief.empty:
-            st.error("Failed to fetch data from yfinance")
-            return None
-        
-        # Extract Close prices and rename columns (flatten MultiIndex)
-        spy_close = spy['Close'].rename('SPY')
-        ief_close = ief['Close'].rename('IEF')
-        
-        # Align dates and combine
-        df = pd.concat([spy_close, ief_close], axis=1).dropna()
-        
-        return df
-    except Exception as e:
-        st.error(f"Error fetching data: {e}")
-        return None
-
-def calculate_smooth_signal(df):
-    """Calculate smooth composite signal from price data - FIXED"""
-    df = df.copy()
-    
-    # Calculate returns
-    df['spy_ret'] = df['SPY'].pct_change()
-    df['ief_ret'] = df['IEF'].pct_change()
-    
-    # Momentum indicators
-    df['spy_sma20'] = df['SPY'].rolling(20).mean()
-    df['spy_sma50'] = df['SPY'].rolling(50).mean()
-    df['spy_sma200'] = df['SPY'].rolling(200).mean()
-    
-    # PPO-style signal (like your chart)
-    df['ema12'] = df['SPY'].ewm(span=12, adjust=False).mean()
-    df['ema26'] = df['SPY'].ewm(span=26, adjust=False).mean()
-    df['ppo'] = ((df['ema12'] - df['ema26']) / df['ema26']) * 100
-    df['ppo_signal'] = df['ppo'].ewm(span=9, adjust=False).mean()
-    df['ppo_hist'] = df['ppo'] - df['ppo_signal']
-    
-    # Relative strength SPY vs IEF - FIXED: use simple column names
-    df['spy_ief_ratio'] = df['SPY'] / df['IEF']
-    df['ratio_sma20'] = df['spy_ief_ratio'].rolling(20).mean()
-    df['ratio_signal'] = (df['spy_ief_ratio'] - df['ratio_sma20']) / df['ratio_sma20'] * 100
-    
-    # Volatility (inverse of risk sentiment)
-    df['volatility'] = df['spy_ret'].rolling(20).std()
-    df['vol_signal'] = (df['volatility'].rolling(20).mean() - df['volatility']) / df['volatility'].rolling(20).std()
-    
-    # Trend strength
-    df['trend'] = (df['SPY'] - df['spy_sma200']) / df['spy_sma200'] * 100
-    
-    # === COMPOSITE SIGNAL ===
-    composite = (
-        df['ppo_hist'] * 0.40 +           # PPO histogram (momentum)
-        df['ratio_signal'] * 0.25 +        # SPY/IEF relative strength
-        df['trend'] * 0.20 +               # Long-term trend
-        df['vol_signal'] * 0.10 +          # Volatility signal
-        df['ppo'] * 0.05                   # PPO line
+def fetch_adj_close(tickers, start, end) -> pd.DataFrame:
+    px = yf.download(
+        tickers=tickers,
+        start=start,
+        end=end,
+        interval="1d",
+        auto_adjust=True,
+        progress=False,
+        group_by="column",
+        threads=True,
     )
-    
-    # Smooth the composite (like PPO 5,13,0)
-    composite_smooth = composite.ewm(span=5, adjust=False).mean()
-    
-    # Normalize around zero
-    composite_smooth = (composite_smooth - composite_smooth.rolling(50, min_periods=1).mean())
-    
-    df['signal_line'] = composite_smooth
-    
-    # Generate signals
-    df['signal'] = np.where(df['signal_line'] > 0, 'SPY', 'IEF')
-    
-    return df
+    # yfinance returns different shapes depending on count of tickers
+    if isinstance(tickers, str) or len(tickers) == 1:
+        adj = px["Close"].to_frame(tickers if isinstance(tickers, str) else tickers[0])
+    else:
+        # with auto_adjust=True, "Close" is adjusted close
+        adj = px["Close"].copy()
+    adj = adj.dropna(how="all")
+    adj.index = pd.to_datetime(adj.index)
+    return adj
 
-def calculate_strategy_returns(df):
-    """Calculate strategy returns based on signal"""
-    df = df.copy()
-    
-    # Create allocations
-    df['SPY_%'] = np.where(df['signal'] == 'SPY', 100, 0)
-    df['IEF_%'] = np.where(df['signal'] == 'IEF', 100, 0)
-    
-    # Calculate daily returns
-    df['spy_ret'] = df['SPY'].pct_change().fillna(0)
-    df['ief_ret'] = df['IEF'].pct_change().fillna(0)
-    
-    # Strategy return: 100% in SPY or 100% in IEF based on signal
-    df['strategy_ret'] = (
-        (df['SPY_%'] / 100) * df['spy_ret'].shift(1) + 
-        (df['IEF_%'] / 100) * df['ief_ret'].shift(1)
-    ).fillna(0)
-    
-    # Cumulative returns (starting at 100)
-    df['buyhold_cum'] = (1 + df['spy_ret']).cumprod() * 100
-    df['strat_cum'] = (1 + df['strategy_ret']).cumprod() * 100
-    
-    # Find crossovers
-    df['crossed_above'] = (df['signal_line'] > 0) & (df['signal_line'].shift(1) <= 0)
-    df['crossed_below'] = (df['signal_line'] < 0) & (df['signal_line'].shift(1) >= 0)
-    
-    return df
+def build_composite_and_signal(
+    closes: pd.DataFrame,
+    weights: dict,
+    zwin: int,
+    fast: int,
+    slow: int,
+    smooth_sma: int,
+    use_ppo: bool,
+    ppo_eps: float,
+) -> pd.DataFrame:
+    """
+    Build composite from real series:
+    - Breadth proxy: SPY vs 200D MA (percent above)
+    - Momentum: SPY 20D return
+    - Participation proxy: RSP/SPY ratio (equal-weight participation)
+    - Risk: inverse VIX (lower VIX => higher risk-on)
+    - Credit: HYG/LQD ratio (junk vs IG)
+    """
+    df = closes.copy()
+
+    required = ["SPY", "IEF", "^VIX", "RSP", "HYG", "LQD"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required tickers in data: {missing}")
+
+    spy = df["SPY"]
+    vix = df["^VIX"]
+    rsp = df["RSP"]
+    hyg = df["HYG"]
+    lqd = df["LQD"]
+
+    # Components
+    spy_ma200 = spy.rolling(200, min_periods=200).mean()
+    breadth = (spy / spy_ma200 - 1.0) * 100.0                         # % above 200D
+
+    momentum = spy.pct_change(20) * 100.0                             # 20D return (%)
+
+    participation = (rsp / spy).pct_change(20) * 100.0                # 20D change in RSP/SPY (%)
+
+    risk = -(vix)                                                     # inverse VIX (lower VIX is "higher risk-on")
+
+    credit = (hyg / lqd)                                              # junk vs IG ratio
+
+    # Normalize components to comparable scale
+    breadth_z = zscore(breadth, window=zwin)
+    momentum_z = zscore(momentum, window=zwin)
+    participation_z = zscore(participation, window=zwin)
+    risk_z = zscore(risk, window=zwin)
+    credit_z = zscore(credit.pct_change(20), window=zwin)             # focus on trend in credit ratio
+
+    comp = (
+        weights["breadth"] * breadth_z +
+        weights["momentum"] * momentum_z +
+        weights["participation"] * participation_z +
+        weights["risk"] * risk_z +
+        weights["credit"] * credit_z
+    )
+
+    comp = comp.dropna()
+
+    # Smooth regime line (PPO-like or MACD-like)
+    fast_ema = ema(comp, fast)
+    slow_ema = ema(comp, slow)
+
+    if use_ppo:
+        denom = slow_ema.abs().clip(lower=ppo_eps)
+        regime = (fast_ema - slow_ema) / denom * 100.0
+    else:
+        regime = (fast_ema - slow_ema)  # MACD-style difference
+
+    regime = regime.rolling(smooth_sma, min_periods=1).mean()
+
+    out = pd.DataFrame(index=comp.index)
+    out["SPY"] = df.loc[out.index, "SPY"]
+    out["IEF"] = df.loc[out.index, "IEF"]
+    out["RegimeLine"] = regime
+    out["Composite"] = comp
+
+    # Signal today (t): if >0 -> SPY else IEF
+    out["Signal"] = np.where(out["RegimeLine"] > 0, "SPY", "IEF")
+
+    # Lookahead fix: trade on next bar (t+1)
+    out["Signal_lag"] = out["Signal"].shift(1)
+    out = out.dropna(subset=["Signal_lag"])
+
+    # Returns
+    out["spy_ret"] = out["SPY"].pct_change().fillna(0.0)
+    out["ief_ret"] = out["IEF"].pct_change().fillna(0.0)
+
+    out["strat_ret"] = np.where(out["Signal_lag"] == "SPY", out["spy_ret"], out["ief_ret"])
+    out["buyhold_ret"] = out["spy_ret"]
+
+    out["strat_cum"] = (1.0 + out["strat_ret"]).cumprod() * 100.0
+    out["buyhold_cum"] = (1.0 + out["buyhold_ret"]).cumprod() * 100.0
+
+    # Crossovers on the actual regime line (today)
+    out["CrossedAbove"] = (out["RegimeLine"] > 0) & (out["RegimeLine"].shift(1) <= 0)
+    out["CrossedBelow"] = (out["RegimeLine"] < 0) & (out["RegimeLine"].shift(1) >= 0)
+
+    return out
 
 # ============================================
-# CURRENT SIGNAL
+# UI
 # ============================================
 
-def get_current_signal():
-    """Get latest signal from real data"""
-    try:
-        df = fetch_real_data(period="6mo")
-        if df is None:
-            return None, None, None
-        
-        df = calculate_smooth_signal(df)
-        df = calculate_strategy_returns(df)
-        
-        latest = df.iloc[-1]
-        signal = latest['signal']
-        
-        if signal == 'SPY':
-            alloc = {'SPY': 100, 'IEF': 0}
-        else:
-            alloc = {'SPY': 0, 'IEF': 100}
-        
-        return signal, alloc, latest['signal_line']
-    except:
-        return None, None, None
+def render_current_tab(result: pd.DataFrame):
+    last = result.iloc[-1]
+    signal_now = last["Signal"]          # today's computed signal
+    alloc = {"SPY": 100, "IEF": 0} if signal_now == "SPY" else {"SPY": 0, "IEF": 100}
+    score = float(last["RegimeLine"])
 
-# ============================================
-# TAB 1: CURRENT SIGNAL
-# ============================================
-
-def render_current_tab():
-    signal, alloc, score = get_current_signal()
-    
-    if signal is None:
-        st.error("Unable to fetch current signal. Please try again.")
-        return
-    
-    if signal == "SPY":
+    if signal_now == "SPY":
         st.markdown(f"""
         <div class="signal-spy">
             🟢 ROTATE TO SPY (100%)<br>
-            <small>Signal: {score:+.2f} • Above zero threshold</small>
+            <span class="smallnote">Regime line: {score:+.2f} • Above zero</span>
         </div>
         """, unsafe_allow_html=True)
+        st.markdown("### ⚡ Execute")
+        st.button("✅ Buy SPY / Sell IEF", type="primary", use_container_width=True)
     else:
         st.markdown(f"""
         <div class="signal-ief">
             🔴 ROTATE TO IEF (100%)<br>
-            <small>Signal: {score:+.2f} • Below zero threshold</small>
+            <span class="smallnote">Regime line: {score:+.2f} • Below zero</span>
         </div>
         """, unsafe_allow_html=True)
-    
-    st.markdown("### ⚡ Execute")
-    if signal == "SPY":
-        st.button("✅ Buy SPY / Sell IEF", type="primary", use_container_width=True)
-    else:
+        st.markdown("### ⚡ Execute")
         st.button("✅ Buy IEF / Sell SPY", type="primary", use_container_width=True)
 
-# ============================================
-# TAB 2: REAL DATA CHART
-# ============================================
+    st.markdown("---")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("Today Signal", signal_now)
+    with c2:
+        st.metric("Next-Day Position (no lookahead)", last["Signal_lag"])
+    with c3:
+        st.metric("Composite (z-weighted)", f"{float(last['Composite']):+.2f}")
+    with c4:
+        st.metric("Last Close Date", str(result.index[-1].date()))
 
-def render_chart_tab():
-    st.subheader("📈 Real SPY/IEF Performance with Signal")
-    st.markdown("*Actual data from yfinance • Cross above zero = SPY | Cross below zero = IEF*")
-    
-    if st.button("📊 Load Real Data Chart", type="primary"):
-        with st.spinner("Fetching real data from yfinance..."):
-            df = fetch_real_data(period="5y")
-            
-            if df is None:
-                st.error("Failed to fetch data. Please try again.")
-                return
-            
-            # Calculate signal
-            df = calculate_smooth_signal(df)
-            df = calculate_strategy_returns(df)
-            
-            # === CHART 1: SPY Price with Signals ===
-            fig1 = go.Figure()
-            
-            # SPY price
-            fig1.add_trace(go.Scatter(
-                x=df.index,
-                y=df['SPY'],
-                name='SPY Price',
-                line=dict(color='#1f77b4', width=2)
-            ))
-            
-            # Color background by signal
-            prev_signal = None
-            for i in range(len(df)-1):
-                curr_signal = df['signal'].iloc[i]
-                if curr_signal != prev_signal:
-                    start_idx = i
-                    end_idx = i + 1
-                    while end_idx < len(df) and df['signal'].iloc[end_idx] == curr_signal:
-                        end_idx += 1
-                    
-                    color = 'rgba(16, 185, 129, 0.10)' if curr_signal == 'SPY' else 'rgba(220, 38, 38, 0.10)'
-                    fig1.add_vrect(
-                        x0=df.index[start_idx],
-                        x1=df.index[min(end_idx, len(df)-1)],
-                        fillcolor=color,
-                        opacity=0.5,
-                        layer="below",
-                        line_width=0
-                    )
-                    prev_signal = curr_signal
-            
-            # Add crossover markers
-            buy_signals = df[df['crossed_above']]
-            sell_signals = df[df['crossed_below']]
-            
-            if not buy_signals.empty:
-                fig1.add_trace(go.Scatter(
-                    x=buy_signals.index,
-                    y=buy_signals['SPY'],
-                    mode='markers',
-                    name='→ SPY (Cross Above)',
-                    marker=dict(color='#10b981', size=10, symbol='triangle-up')
-                ))
-            
-            if not sell_signals.empty:
-                fig1.add_trace(go.Scatter(
-                    x=sell_signals.index,
-                    y=sell_signals['SPY'],
-                    mode='markers',
-                    name='→ IEF (Cross Below)',
-                    marker=dict(color='#dc2626', size=10, symbol='triangle-down')
-                ))
-            
-            fig1.update_layout(
-                title='SPY Price with Rotation Signals (Real Data)',
-                xaxis_title='Date',
-                yaxis_title='SPY Price ($)',
-                height=450,
-                hovermode='x unified',
-                legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
-            )
-            
-            st.plotly_chart(fig1, use_container_width=True)
-            
-            # === CHART 2: Signal Line ===
-            fig2 = go.Figure()
-            
-            fig2.add_trace(go.Scatter(
-                x=df.index,
-                y=df['signal_line'],
-                name='Smooth Signal Line',
-                line=dict(color='#ff7f0e', width=2)
-            ))
-            
-            fig2.add_hline(y=0, line_dash="dash", line_color="gray")
-            
-            fig2.update_layout(
-                title='Composite Signal Line (PPO-Style)',
-                xaxis_title='Date',
-                yaxis_title='Signal Value',
-                height=300,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            # === CHART 3: Performance Comparison ===
-            fig3 = go.Figure()
-            
-            fig3.add_trace(go.Scatter(
-                x=df.index,
-                y=df['buyhold_cum'],
-                name='Buy-and-Hold SPY',
-                line=dict(color='#6b7280', width=2)
-            ))
-            
-            fig3.add_trace(go.Scatter(
-                x=df.index,
-                y=df['strat_cum'],
-                name='Strategy (SPY/IEF Rotation)',
-                line=dict(color='#10b981', width=2.5)
-            ))
-            
-            fig3.update_layout(
-                title='Real Performance Comparison ($100 Starting Value)',
-                xaxis_title='Date',
-                yaxis_title='Portfolio Value ($)',
-                height=400,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig3, use_container_width=True)
-            
-            # === PERFORMANCE METRICS ===
-            total_bh = (df['buyhold_cum'].iloc[-1] - 100)
-            total_strat = (df['strat_cum'].iloc[-1] - 100)
-            
-            # Calculate CAGR
-            years = (df.index[-1] - df.index[0]).days / 365.25
-            cagr_bh = ((df['buyhold_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
-            cagr_strat = ((df['strat_cum'].iloc[-1] / 100) ** (1/years) - 1) * 100
-            
-            # Max drawdown
-            def max_dd(cum):
-                peak = cum.cummax()
-                dd = (cum - peak) / peak * 100
-                return dd.min()
-            
-            mdd_bh = max_dd(df['buyhold_cum'])
-            mdd_strat = max_dd(df['strat_cum'])
-            
-            # Count rotations
-            rotations = len(df[df['crossed_above']]) + len(df[df['crossed_below']])
-            
-            st.markdown("### 📊 Real Performance Metrics")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Return", f"{total_strat:+.1f}%", 
-                         delta=f"{total_strat - total_bh:+.1f}% vs Buy-and-Hold")
-            with col2:
-                st.metric("CAGR", f"{cagr_strat:+.1f}%", 
-                         delta=f"{cagr_strat - cagr_bh:+.1f}% vs Buy-and-Hold")
-            with col3:
-                st.metric("Max Drawdown", f"{mdd_strat:.1f}%", 
-                         delta=f"{mdd_strat - mdd_bh:+.1f}% vs Buy-and-Hold")
-            with col4:
-                st.metric("Signal Rotations", f"{rotations}", 
-                         delta=f"~{rotations/years:.1f} per year")
-            
-            st.success("✅ Real data loaded from yfinance • Actual SPY and IEF prices")
-    else:
-        st.info("👆 Click button to load real data from yfinance")
+def render_chart_tab(result: pd.DataFrame):
+    st.subheader("📈 SPY Price + Smooth Regime Line (Real Data)")
+    st.markdown("*Above zero = SPY next day • Below zero = IEF next day • Signal uses lag to avoid lookahead*")
+
+    fig = go.Figure()
+
+    # SPY price
+    fig.add_trace(go.Scatter(
+        x=result.index, y=result["SPY"],
+        name="SPY (Adj Close)",
+        line=dict(width=2),
+        yaxis="y1"
+    ))
+
+    # Regime line
+    fig.add_trace(go.Scatter(
+        x=result.index, y=result["RegimeLine"],
+        name="Regime Line",
+        line=dict(width=2.5),
+        yaxis="y2"
+    ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray",
+                  annotation_text="Zero Threshold", annotation_position="top right")
+
+    # Shade background by *lagged* signal (what you actually hold)
+    hold = result["Signal_lag"]
+    changes = (hold != hold.shift(1)).fillna(True)
+    blocks = result.loc[changes, ["RegimeLine"]].copy()
+    block_starts = list(blocks.index)
+    block_starts.append(result.index[-1])
+
+    for i in range(len(block_starts) - 1):
+        start = block_starts[i]
+        end = block_starts[i + 1]
+        sig = hold.loc[start]
+        color = "rgba(16, 185, 129, 0.10)" if sig == "SPY" else "rgba(220, 38, 38, 0.10)"
+        fig.add_vrect(x0=start, x1=end, fillcolor=color, opacity=0.5, layer="below", line_width=0)
+
+    # Cross markers (regime cross today)
+    buys = result[result["CrossedAbove"]]
+    sells = result[result["CrossedBelow"]]
+
+    if not buys.empty:
+        fig.add_trace(go.Scatter(
+            x=buys.index, y=buys["RegimeLine"],
+            mode="markers", name="Cross Above → SPY",
+            marker=dict(size=10, symbol="triangle-up")
+        ))
+    if not sells.empty:
+        fig.add_trace(go.Scatter(
+            x=sells.index, y=sells["RegimeLine"],
+            mode="markers", name="Cross Below → IEF",
+            marker=dict(size=10, symbol="triangle-down")
+        ))
+
+    fig.update_layout(
+        title="SPY with Smooth Regime Line (Real Data)",
+        xaxis_title="Date (Daily)",
+        yaxis=dict(title="SPY Price", side="left", showgrid=True),
+        yaxis2=dict(title="Regime Line", side="right", overlaying="y", showgrid=False),
+        height=650,
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Performance metrics
+    strat_total = float(result["strat_cum"].iloc[-1] - 100.0)
+    bh_total = float(result["buyhold_cum"].iloc[-1] - 100.0)
+    mdd_strat = max_drawdown(result["strat_cum"])
+    mdd_bh = max_drawdown(result["buyhold_cum"])
+
+    rotations = int(result["CrossedAbove"].sum() + result["CrossedBelow"].sum())
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Strategy Return", f"{strat_total:+.1f}%", delta=f"{(strat_total - bh_total):+.1f}% vs Buy/Hold")
+    with col2:
+        st.metric("Max Drawdown", f"{mdd_strat:.1%}", delta=f"BH {mdd_bh:.1%}")
+    with col3:
+        st.metric("Rotations", f"{rotations}", delta=f"~{rotations/12:.1f}/month (approx)")
+
+    with st.expander("Show recent signals"):
+        tail = result[["SPY", "IEF", "RegimeLine", "Signal", "Signal_lag", "strat_cum", "buyhold_cum"]].tail(20)
+        st.dataframe(tail, use_container_width=True)
 
 # ============================================
 # MAIN
 # ============================================
 
 def main():
-    st.title("🔄 SPY/IEF Signal Dashboard (REAL DATA)")
-    st.markdown("*Real historical data from yfinance • Smooth PPO-style signal • Zero-line crossovers*")
-    
-    tab1, tab2 = st.tabs(["🎯 Current Signal", "📊 Real Data Chart"])
-    
-    with tab1:
-        render_current_tab()
-    with tab2:
-        render_chart_tab()
-    
+    st.title("🔄 SPY/IEF Smooth Signal Dashboard (Real Data)")
+    st.markdown("*Real daily data • Composite proxies • Smooth regime line • No lookahead (signal applies next day)*")
+
     with st.sidebar:
         st.header("⚙️ Settings")
-        st.markdown("**Data Source:** yfinance (real-time)")
-        st.markdown("**Signal Logic:**")
-        st.markdown("""
-        Composite = 
-        - 40% PPO Histogram (momentum)
-        - 25% SPY/IEF Ratio (relative strength)
-        - 20% Trend vs 200-SMA
-        - 10% Volatility signal
-        - 5% PPO line
-        
-        **Smoothing:** EMA(5) + normalization
-        
-        **Threshold:** 
-        - Cross ABOVE zero → SPY (100%)
-        - Cross BELOW zero → IEF (100%)
-        """)
-        if st.button("🔄 Refresh Data", use_container_width=True):
+
+        years = st.slider("History (years)", 1, 20, 5)
+        end = datetime.now().date() + timedelta(days=1)  # include latest close if available
+        start = (datetime.now() - timedelta(days=int(365.25 * years))).date()
+
+        st.subheader("Composite Weights")
+        w_breadth = st.slider("Breadth (SPY vs 200MA)", 0.0, 1.0, 0.35, 0.05)
+        w_mom = st.slider("Momentum (SPY 20D return)", 0.0, 1.0, 0.25, 0.05)
+        w_part = st.slider("Participation (RSP/SPY)", 0.0, 1.0, 0.20, 0.05)
+        w_risk = st.slider("Risk (inverse VIX)", 0.0, 1.0, 0.10, 0.05)
+        w_credit = st.slider("Credit (HYG/LQD)", 0.0, 1.0, 0.10, 0.05)
+
+        w_sum = w_breadth + w_mom + w_part + w_risk + w_credit
+        if abs(w_sum - 1.0) > 1e-6:
+            st.warning(f"Weights sum to {w_sum:.2f}. They will be normalized automatically.")
+
+        st.subheader("Smoothing")
+        fast = st.slider("Fast EMA", 2, 30, 5)
+        slow = st.slider("Slow EMA", 5, 60, 13)
+        smooth_sma = st.slider("Extra SMA smoothing", 1, 10, 3)
+
+        use_ppo = st.toggle("Use PPO-style normalization", value=True)
+        zwin = st.slider("Z-score window (days)", 60, 504, 252, 21)
+
+        if st.button("🔄 Refresh data / clear cache", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-        st.caption("⚠️ Not investment advice • Real data • Test before live use")
+
+        st.caption("⚠️ Not investment advice.")
+
+    # Normalize weights if needed
+    weights = {
+        "breadth": w_breadth,
+        "momentum": w_mom,
+        "participation": w_part,
+        "risk": w_risk,
+        "credit": w_credit,
+    }
+    ws = sum(weights.values())
+    if ws <= 0:
+        st.error("Weights sum to 0. Increase at least one weight.")
+        return
+    weights = {k: v / ws for k, v in weights.items()}
+
+    tickers = ["SPY", "IEF", "^VIX", "RSP", "HYG", "LQD"]
+
+    try:
+        closes = fetch_adj_close(tickers, start=str(start), end=str(end))
+        result = build_composite_and_signal(
+            closes=closes,
+            weights=weights,
+            zwin=zwin,
+            fast=fast,
+            slow=slow,
+            smooth_sma=smooth_sma,
+            use_ppo=use_ppo,
+            ppo_eps=1e-6,
+        )
+    except Exception as e:
+        st.error(f"Error building signal: {e}")
+        st.stop()
+
+    tab1, tab2 = st.tabs(["🎯 Current Signal", "📊 Chart + Backtest"])
+    with tab1:
+        render_current_tab(result)
+    with tab2:
+        render_chart_tab(result)
 
 if __name__ == "__main__":
     main()
