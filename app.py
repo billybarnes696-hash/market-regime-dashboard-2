@@ -10,15 +10,8 @@ st.title("🎯 Breadth Confluence Tracker")
 st.caption(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
 # ─────────────────────────────────────────────────────────────
-# SIDEBAR: PDF UPLOAD + INPUTS
+# SIDEBAR: INPUTS
 # ─────────────────────────────────────────────────────────────
-st.sidebar.header("📁 Upload Chart PDF")
-uploaded_file = st.sidebar.file_uploader("StockCharts PDF", type=["pdf"])
-
-if uploaded_file:
-    st.sidebar.success("✅ PDF Uploaded")
-
-st.sidebar.divider()
 st.sidebar.header("📊 Indicator Values")
 
 # OSCILLATORS (Intraday)
@@ -43,11 +36,12 @@ SPX_pctB = st.sidebar.number_input("SPX %B", value=-0.09, format="%.2f")
 HYG_IEF_RSI = st.sidebar.number_input("HYG:IEF RSI", value=45.80, format="%.2f")
 
 # ─────────────────────────────────────────────────────────────
-# SCORING LOGIC
+# SCORING LOGIC (FIXED)
 # ─────────────────────────────────────────────────────────────
 def score_indicator(name, value):
     """Returns +1 (bullish), -1 (bearish), or 0 (neutral)"""
     
+    # Special cases first
     if name == "BPSPX_ROC":
         return 1 if value > 0 else -1
     
@@ -63,16 +57,23 @@ def score_indicator(name, value):
     if name == "VXX_pctB":
         return 1 if value < 0.30 else -1 if value > 0.80 else 0
     
-    # %B indicators (bull > threshold, bear < threshold)
-    bull = {
+    if name == "HYG_IEF_RSI":
+        return 1 if value > 50 else -1 if value < 40 else 0
+    
+    # %B indicators with safe dictionary access
+    bull_thresholds = {
         "BPSPX_pctB": 0.30, "BPNYA_pctB": 0.25, "SPXA50R_pctB": 0.30,
         "OEXA50R_pctB": 0.30, "OEXA200R_pctB": 0.50, "SPX_pctB": 0.30
-    }[name]
+    }
     
-    bear = {
+    bear_thresholds = {
         "BPSPX_pctB": 0.20, "BPNYA_pctB": 0.15, "SPXA50R_pctB": 0.10,
         "OEXA50R_pctB": 0.10, "OEXA200R_pctB": 0.30, "SPX_pctB": 0.20
-    }[name]
+    }
+    
+    # Safe access with default
+    bull = bull_thresholds.get(name, 0.30)
+    bear = bear_thresholds.get(name, 0.20)
     
     if value >= bull:
         return 1
@@ -80,37 +81,41 @@ def score_indicator(name, value):
         return -1
     return 0
 
+# Weights (must match values keys)
 weights = {
     "BPSPX_pctB": 2.0, "BPSPX_ROC": 2.0, "BPNYA_pctB": 1.0,
     "SPXA50R_pctB": 1.0, "OEXA50R_pctB": 0.5, "OEXA200R_pctB": 0.5,
     "NYMO": 1.0, "NYAD_slope": 1.0, "NYHL": 1.0,
-    "CPCE": 0.5, "VXX_pctB": 0.5, "SPX_pctB": 0.5
+    "CPCE": 0.5, "VXX_pctB": 0.5, "SPX_pctB": 0.5, "HYG_IEF_RSI": 0.5
 }
 
+# Values (must match weights keys)
 values = {
     "BPSPX_pctB": bpSPX_pctB, "BPSPX_ROC": bpSPX_ROC, "BPNYA_pctB": BPNYA_pctB,
     "SPXA50R_pctB": SPXA50R_pctB, "OEXA50R_pctB": OEXA50R_pctB,
     "OEXA200R_pctB": OEXA200R_pctB, "NYMO": NYMO, "NYAD_slope": NYAD_slope,
-    "NYHL": NYHL_value, "CPCE": CPCE, "VXX_pctB": VXX_pctB, "SPX_pctB": SPX_pctB
+    "NYHL": NYHL_value, "CPCE": CPCE, "VXX_pctB": VXX_pctB, 
+    "SPX_pctB": SPX_pctB, "HYG_IEF_RSI": HYG_IEF_RSI
 }
 
+# Calculate score
 score = sum(score_indicator(k, v) * w for k, v, w in zip(values.keys(), values.values(), weights.values()))
 
 # ─────────────────────────────────────────────────────────────
 # SIGNAL LOGIC
 # ─────────────────────────────────────────────────────────────
 if score >= 7:
-    signal, action, color = "🟢 STRONG BUY", "Add 75-100%", "green"
+    signal, action = "🟢 STRONG BUY", "Add 75-100%"
 elif score >= 4:
-    signal, action, color = "🟢 BUY", "Add 50-75%", "green"
+    signal, action = "🟢 BUY", "Add 50-75%"
 elif score >= 0:
-    signal, action, color = "🟡 HOLD", "Hold core, no adds", "yellow"
+    signal, action = "🟡 HOLD", "Hold core, no adds"
 elif score >= -4:
-    signal, action, color = "🟡 CAUTION", "Reduce to 25-50%", "orange"
+    signal, action = "🟡 CAUTION", "Reduce to 25-50%"
 elif score >= -7:
-    signal, action, color = "🔴 SELL", "Reduce to 0-25%", "red"
+    signal, action = "🔴 SELL", "Reduce to 0-25%"
 else:
-    signal, action, color = "🔴 CAPITULATION", "Watch for bounce", "red"
+    signal, action = "🔴 CAPITULATION", "Watch for bounce"
 
 # ─────────────────────────────────────────────────────────────
 # MAIN DISPLAY
@@ -147,22 +152,6 @@ for i, (name, value) in enumerate(values.items()):
     icon = "🟢" if s > 0 else "🔴" if s < 0 else "🟡"
     with cols[i % 2]:
         st.write(f"{icon} **{name}**: {value}")
-
-# ─────────────────────────────────────────────────────────────
-# WATCHLIST
-# ─────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("👁️ Watch Next 5 Days")
-
-st.write("**🟢 Bounce Confirmed If:**")
-st.write("• BPSPX %B > 0.10")
-st.write("• NYMO > -70")
-st.write("• SPX holds 6,600")
-
-st.write("**🔴 Downside If:**")
-st.write("• BPSPX %B < 0.00")
-st.write("• SPX < 6,500")
-st.write("• VXX > 40")
 
 # ─────────────────────────────────────────────────────────────
 # FOOTER
