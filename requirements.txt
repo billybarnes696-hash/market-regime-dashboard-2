@@ -3,3 +3,4 @@ pandas
 numpy
 yfinance
 plotly
+streamlit==1.32.0
