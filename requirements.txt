@@ -1,4 +1,6 @@
-streamlit
-pandas
-requests
-beautifulsoup4
+pandas>=2.0.0
+numpy>=1.24.0
+yfinance>=0.2.43
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+pandas_ta>=0.3.14b
