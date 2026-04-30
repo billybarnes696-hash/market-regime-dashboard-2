@@ -100,6 +100,10 @@ with st.sidebar:
     tsi_long = st.number_input("TSI Long", 2, 50, 25)
     tsi_short = st.number_input("TSI Short", 2, 50, 13)
     wr_win = st.number_input("Williams %R Window", 2, 50, 14)
+    
+    st.divider()
+    st.header("📅 Time Window")
+    view_range = st.selectbox("Select View", ["6 Months", "1 Year", "2 Years", "3 Years", "4 Years", "Custom"])
 
 # -----------------------------
 # Data Processing
@@ -124,12 +128,12 @@ if df.empty:
     st.warning("No overlapping dates or valid data found.")
     st.stop()
 
-# Calculate Cumulative Values
+# Calculate Cumulative Values & Indicators on FULL HISTORY first
 df['Cum_NYMO'] = df['Value_nymo'].cumsum()
 df['Cum_NYHL'] = df['Value_nyhl'].cumsum()
 df['Composite'] = (df['Cum_NYMO'] * (w_nymo/100)) + (df['Cum_NYHL'] * (w_nyhl/100))
 
-# Approximate High/Low for CCI/Williams %R (since we only have a composite line)
+# Approximate High/Low for CCI/Williams %R
 window_hl = 5
 df['High'] = df['Composite'].rolling(window_hl, center=True).max()
 df['Low'] = df['Composite'].rolling(window_hl, center=True).min()
@@ -142,32 +146,58 @@ df['TSI'], df['TSI_Signal'] = calc_tsi(df['Close'], tsi_long, tsi_short, 7)
 df['WR'] = calc_wr(df['High'], df['Low'], df['Close'], wr_win)
 
 # -----------------------------
+# 📅 Date Range Filtering
+# -----------------------------
+latest_date = df['Date'].max()
+earliest_date = df['Date'].min()
+
+if view_range == "Custom":
+    c1, c2 = st.sidebar.columns(2)
+    start_date = c1.date_input("Start", value=latest_date - pd.DateOffset(years=1), min_value=earliest_date, max_value=latest_date)
+    end_date = c2.date_input("End", value=latest_date, min_value=earliest_date, max_value=latest_date)
+else:
+    offset_map = {
+        "6 Months": pd.DateOffset(months=6),
+        "1 Year": pd.DateOffset(years=1),
+        "2 Years": pd.DateOffset(years=2),
+        "3 Years": pd.DateOffset(years=3),
+        "4 Years": pd.DateOffset(years=4)
+    }
+    # Clamp to dataset bounds
+    start_date = max(earliest_date, latest_date - offset_map[view_range])
+    end_date = latest_date
+    st.sidebar.caption(f"🔍 Showing: `{start_date.date()}` → `{end_date.date()}`")
+
+# Filter for display (keeps cumulative context intact)
+df_view = df[(df['Date'] >= pd.Timestamp(start_date)) & (df['Date'] <= pd.Timestamp(end_date))].copy()
+
+# -----------------------------
 # Display & Plotting
 # -----------------------------
-st.dataframe(df[['Date', 'Cum_NYMO', 'Cum_NYHL', 'Composite', 'RSI', 'TSI', 'CCI', 'WR']].tail(10), use_container_width=True)
+st.dataframe(df_view[['Date', 'Cum_NYMO', 'Cum_NYHL', 'Composite', 'RSI', 'TSI', 'CCI', 'WR']].tail(15), use_container_width=True)
 
 fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                     row_heights=[0.4, 0.2, 0.2, 0.2],
                     subplot_titles=["Cumulative Oscillators", "RSI", "TSI", "CCI & Williams %R"])
 
 # Row 1
-fig.add_trace(go.Scatter(x=df['Date'], y=df['Cum_NYMO'], name='Cum NYMO', line=dict(color='blue')), row=1, col=1)
-fig.add_trace(go.Scatter(x=df['Date'], y=df['Cum_NYHL'], name='Cum NYHL', line=dict(color='orange')), row=1, col=1)
-fig.add_trace(go.Scatter(x=df['Date'], y=df['Composite'], name='Weighted Composite', line=dict(color='black', width=2)), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['Cum_NYMO'], name='Cum NYMO', line=dict(color='blue')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['Cum_NYHL'], name='Cum NYHL', line=dict(color='orange')), row=1, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['Composite'], name='Weighted Composite', line=dict(color='black', width=2)), row=1, col=1)
 
 # Row 2: RSI
-fig.add_trace(go.Scatter(x=df['Date'], y=df['RSI'], name='RSI', line=dict(color='purple')), row=2, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['RSI'], name='RSI', line=dict(color='purple')), row=2, col=1)
 fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
 fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
 # Row 3: TSI
-fig.add_trace(go.Scatter(x=df['Date'], y=df['TSI'], name='TSI', line=dict(color='teal')), row=3, col=1)
-fig.add_trace(go.Scatter(x=df['Date'], y=df['TSI_Signal'], name='TSI Signal', line=dict(color='gray', dash='dot')), row=3, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['TSI'], name='TSI', line=dict(color='teal')), row=3, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['TSI_Signal'], name='TSI Signal', line=dict(color='gray', dash='dot')), row=3, col=1)
 fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
 
 # Row 4: CCI & WR
-fig.add_trace(go.Scatter(x=df['Date'], y=df['CCI'], name='CCI', line=dict(color='cyan')), row=4, col=1)
-fig.add_trace(go.Scatter(x=df['Date'], y=df['WR'], name='Williams %R', line=dict(color='brown')), row=4, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['CCI'], name='CCI', line=dict(color='cyan')), row=4, col=1)
+fig.add_trace(go.Scatter(x=df_view['Date'], y=df_view['WR'], name='Williams %R', line=dict(color='brown')), row=4, col=1)
 fig.add_hline(y=-20, line_dash="dash", line_color="red", row=4, col=1)
 fig.add_hline(y=-80, line_dash="dash", line_color="green", row=4, col=1)
 
